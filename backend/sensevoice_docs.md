@@ -16,7 +16,7 @@ model = AutoModel(
     model="FunAudioLLM/SenseVoiceSmall",
     vad_model="fsmn-vad",                    # Tích hợp VAD (phát hiện giọng nói)
     vad_kwargs={"max_single_segment_time": 30000},
-    device="cuda:0"                          # hoặc "cpu"
+    device="cuda"                          # hoặc "cpu"
 )
 ```
 
@@ -72,10 +72,7 @@ Hàm `generate()` trả về **list dict**, mỗi phần tử mô tả một đo
 [
   {
     "text": "Xin chào, tôi là trợ lý ảo.",
-    "timestamp": [0.12, 2.53],
-    "lang": "vi",
-    "emotion": "neutral",
-    "event": None
+    "key": "rand_key_gUe52RvEJgwBu"
   },
   ...
 ]
@@ -84,10 +81,7 @@ Hàm `generate()` trả về **list dict**, mỗi phần tử mô tả một đo
 Mỗi phần tử có:
 
 * `text` — nội dung nhận dạng
-* `timestamp` — `[start, end]` (giây)
-* `lang` — mã ngôn ngữ (nếu bật LID)
-* `emotion` — cảm xúc (neutral, happy, angry, sad, …)
-* `event` — loại âm thanh đặc biệt (applause, laugh, cough, music, …)
+* `key`  — key
 
 ---
 
@@ -138,7 +132,7 @@ res = model.generate(
 )
 
 for r in res:
-    print(f"[{r['timestamp'][0]:.2f}s - {r['timestamp'][1]:.2f}s] {r['text']}")
+    print(f"{r['text']}")
 ```
 
 ---

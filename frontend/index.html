@@ -73,7 +73,15 @@
       <span id="levelText">0%</span>
     </div>
 
-    <div id="transcript" placeholder="Transcript sẽ hiển thị ở đây..."></div>
+    <div id="realtimeFullTranscript" style="margin-top: 20px;">
+      <h4>Full Transcript:</h4>
+      <div id="fullTranscriptText" style="background: #f9fafb; padding: 16px; border-radius: 8px; margin: 12px 0; white-space: pre-wrap; line-height: 1.6; min-height: 100px; max-height: 300px; overflow-y: auto;"></div>
+    </div>
+
+    <div id="realtimeSegments" style="margin-top: 20px;">
+      <h4>Segments (có timestamp):</h4>
+      <div id="segmentsList" style="max-height: 400px; overflow-y: auto;"></div>
+    </div>
   </div>
 
   <!-- Upload File Tab -->
@@ -114,7 +122,8 @@
     const statusEl = document.getElementById("status");
     const wsUrlEl  = document.getElementById("wsUrl");
     const langEl   = document.getElementById("lang");
-    const transcriptEl = document.getElementById("transcript");
+    const fullTranscriptEl = document.getElementById("fullTranscriptText");
+    const segmentsListEl = document.getElementById("segmentsList");
     const barEl = document.getElementById("bar");
     const levelTextEl = document.getElementById("levelText");
 
@@ -204,7 +213,8 @@
 
     async function start() {
       if (running) return;
-      transcriptEl.textContent = "";
+      fullTranscriptEl.textContent = "";  // Clear full transcript
+      segmentsListEl.innerHTML = "";     // Clear segments list
       leftover = new Float32Array(0);
 
       ws = new WebSocket(wsUrlEl.value);
@@ -226,10 +236,43 @@
           if (data.type === "ready") {
             updateStatus("Sẵn sàng, đang ghi...");
           } else if (data.type === "partial") {
-            // Append gọn gàng
-            if (data.text && data.text.trim()) {
-              transcriptEl.textContent += (transcriptEl.textContent ? " " : "") + data.text.trim();
-              transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            // Stream vào Full Transcript
+            if (data.segments && data.segments.length > 0) {
+              data.segments.forEach(seg => {
+                if (seg.text && seg.text.trim()) {
+                  const currentText = fullTranscriptEl.textContent;
+                  if (currentText) {
+                    fullTranscriptEl.textContent = currentText + seg.text.trim();
+                  } else {
+                    fullTranscriptEl.textContent = seg.text.trim();
+                  }
+                }
+              });
+              // Auto scroll
+              fullTranscriptEl.scrollTop = fullTranscriptEl.scrollHeight;
+            } else if (data.text && data.text.trim()) {
+              // Fallback: nếu không có segments, append text với space
+              const currentText = fullTranscriptEl.textContent;
+              if (currentText) {
+                fullTranscriptEl.textContent = currentText + " " + data.text.trim();
+              } else {
+                fullTranscriptEl.textContent = data.text.trim();
+              }
+              fullTranscriptEl.scrollTop = fullTranscriptEl.scrollHeight;
+            }
+
+            // Stream vào Segments
+            if (data.segments && data.segments.length > 0) {
+              data.segments.forEach(seg => {
+                const timeStr = `${formatTime(seg.start)} → ${formatTime(seg.end)}`;
+                const segmentDiv = document.createElement("div");
+                segmentDiv.className = "segment-item";
+                segmentDiv.style.margin = "8px 0";
+                segmentDiv.innerHTML = `<span class="segment-time">${timeStr}</span><span>${seg.text}</span>`;
+                segmentsListEl.appendChild(segmentDiv);
+                // Auto scroll
+                segmentsListEl.scrollTop = segmentsListEl.scrollHeight;
+              });
             }
           } else if (data.type === "final") {
             updateStatus("Kết thúc phiên", true);
