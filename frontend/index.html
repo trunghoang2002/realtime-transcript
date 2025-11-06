@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <title>Realtime Transcript Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    button { padding: 10px 16px; border: 0; border-radius: 10px; cursor: pointer; }
+    button.primary { background: #2563eb; color: white; }
+    button.secondary { background: #e5e7eb; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    #vu { width: 240px; height: 10px; background: #eee; border-radius: 8px; overflow: hidden; }
+    #bar { height: 100%; width: 0%; background: #16a34a; transition: width .05s linear; }
+    #status { font-size: 14px; color: #6b7280; }
+    #transcript { width: 100%; min-height: 220px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fafafa; line-height: 1.65; }
+    label { font-size: 14px; color: #374151; }
+    select, input[type="text"] { padding: 8px 10px; border-radius: 8px; border: 1px solid #e5e7eb; }
+    .tag { display: inline-block; padding: 4px 8px; background: #eef2ff; color: #3730a3; border-radius: 999px; font-size: 12px; }
+    
+    /* Tabs */
+    .tabs { display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 2px solid #e5e7eb; }
+    .tab { padding: 12px 20px; cursor: pointer; border: none; background: none; font-size: 16px; color: #6b7280; }
+    .tab.active { color: #2563eb; border-bottom: 2px solid #2563eb; margin-bottom: -2px; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    
+    /* File upload */
+    .upload-area { border: 2px dashed #d1d5db; border-radius: 12px; padding: 40px; text-align: center; margin-bottom: 20px; background: #f9fafb; }
+    .upload-area.dragover { border-color: #2563eb; background: #eff6ff; }
+    .upload-area input[type="file"] { display: none; }
+    .progress { width: 100%; height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; margin: 12px 0; }
+    .progress-bar { height: 100%; background: #2563eb; width: 0%; transition: width 0.3s; }
+    .file-result { margin-top: 20px; }
+    .segment-item { margin: 8px 0; padding: 8px; background: #f9fafb; border-left: 3px solid #2563eb; border-radius: 4px; }
+    .segment-time { font-size: 12px; color: #6b7280; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <h1>🎙️ Realtime Transcript</h1>
+  
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="realtime">Realtime</button>
+    <button class="tab" data-tab="upload">Upload File</button>
+  </div>
+
+  <!-- Realtime Tab -->
+  <div id="realtime-tab" class="tab-content active">
+    <div class="row">
+      <label>WebSocket URL:</label>
+      <input id="wsUrl" type="text" value="ws://localhost:8917/ws" style="width: 360px;">
+      <span class="tag">PCM16 @ 16kHz</span>
+    </div>
+
+    <div class="row">
+      <label>Ngôn ngữ (gợi ý):</label>
+      <select id="lang">
+        <option value="auto" selected>Tự động</option>
+        <option value="vi">Tiếng Việt</option>
+        <option value="en">English</option>
+        <option value="ja">日本語</option>
+      </select>
+
+      <button id="startBtn" class="primary">Start</button>
+      <button id="stopBtn" class="secondary" disabled>Stop</button>
+      <span id="status">Chưa kết nối</span>
+    </div>
+
+    <div class="row">
+      <div id="vu"><div id="bar"></div></div>
+      <span id="levelText">0%</span>
+    </div>
+
+    <div id="transcript" placeholder="Transcript sẽ hiển thị ở đây..."></div>
+  </div>
+
+  <!-- Upload File Tab -->
+  <div id="upload-tab" class="tab-content">
+    <div class="row">
+      <label>Ngôn ngữ (gợi ý):</label>
+      <select id="fileLang">
+        <option value="auto" selected>Tự động</option>
+        <option value="vi">Tiếng Việt</option>
+        <option value="en">English</option>
+        <option value="ja">日本語</option>
+      </select>
+      <span id="fileStatus">Sẵn sàng upload</span>
+    </div>
+
+    <div class="upload-area" id="uploadArea">
+      <p style="font-size: 18px; margin-bottom: 12px;">📁 Kéo thả file vào đây hoặc click để chọn</p>
+      <p style="font-size: 14px; color: #6b7280;">Hỗ trợ: .mp3, .wav, .m4a, .mp4, .avi, .mov, ...</p>
+      <input type="file" id="fileInput" accept="audio/*,video/*">
+      <button class="primary" id="selectFileBtn" style="margin-top: 12px;">Chọn File</button>
+    </div>
+
+    <div class="progress" id="progressContainer" style="display: none;">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div id="fileResult" class="file-result"></div>
+  </div>
+
+  <script>
+    // ====== Audio capture + downsample (to 16kHz mono) + PCM16LE ======
+    let audioCtx, micStream, sourceNode, processorNode;
+    let ws;
+    let running = false;
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn  = document.getElementById("stopBtn");
+    const statusEl = document.getElementById("status");
+    const wsUrlEl  = document.getElementById("wsUrl");
+    const langEl   = document.getElementById("lang");
+    const transcriptEl = document.getElementById("transcript");
+    const barEl = document.getElementById("bar");
+    const levelTextEl = document.getElementById("levelText");
+
+    // Buffer để gom dữ liệu trước khi resample
+    // Gửi frame cỡ 40ms để latency thấp (~640 samples @ 16kHz -> 1280 bytes)
+    const TARGET_SR = 16000;
+    const FRAME_MS = 40;
+
+    let inputSampleRate = 48000;
+    let leftover = new Float32Array(0);
+
+    function updateStatus(t, good=true) {
+      statusEl.textContent = t;
+      statusEl.style.color = good ? "#16a34a" : "#dc2626";
+    }
+
+    function levelMeter(float32) {
+      if (!float32 || float32.length === 0) return 0;
+      // RMS đơn giản
+      let sum = 0;
+      for (let i=0; i<float32.length; i++) {
+        const v = float32[i];
+        sum += v*v;
+      }
+      const rms = Math.sqrt(sum / float32.length);
+      const pct = Math.min(100, Math.max(0, Math.round(rms * 200))); // scale
+      barEl.style.width = pct + "%";
+      levelTextEl.textContent = pct + "%";
+    }
+
+    function downsampleFloat32To16kHz(float32, inSampleRate) {
+      if (inSampleRate === TARGET_SR) return float32;
+      const ratio = inSampleRate / TARGET_SR;
+      const outLength = Math.round(float32.length / ratio);
+      const out = new Float32Array(outLength);
+      let pos = 0;
+      let idx = 0;
+      while (pos < outLength) {
+        // simple linear interpolation
+        const i = idx | 0;
+        const frac = idx - i;
+        const s0 = float32[i] || 0;
+        const s1 = float32[i+1] || s0;
+        out[pos++] = s0 + (s1 - s0) * frac;
+        idx += ratio;
+      }
+      return out;
+    }
+
+    function float32ToPCM16(float32) {
+      const out = new Int16Array(float32.length);
+      for (let i=0; i<float32.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return out;
+    }
+
+    function handleAudioProcess(e) {
+      if (!running) return;
+      const input = e.inputBuffer.getChannelData(0); // mono
+      // Nối leftover
+      const merged = new Float32Array(leftover.length + input.length);
+      merged.set(leftover, 0);
+      merged.set(input, leftover.length);
+
+      // Downsample về 16k
+      const ds = downsampleFloat32To16kHz(merged, inputSampleRate);
+      levelMeter(ds);
+
+      // Tính số samples cho một frame gửi
+      const frameSamples = Math.round(TARGET_SR * (FRAME_MS / 1000));
+      const framesCount = Math.floor(ds.length / frameSamples);
+
+      for (let i=0; i<framesCount; i++) {
+        const frame = ds.subarray(i*frameSamples, (i+1)*frameSamples);
+        const pcm16 = float32ToPCM16(frame);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(pcm16.buffer);
+        }
+      }
+
+      // leftover phần dư sau khi tách frame
+      const leftoverStart = framesCount * frameSamples;
+      leftover = ds.slice(leftoverStart);
+    }
+
+    async function start() {
+      if (running) return;
+      transcriptEl.textContent = "";
+      leftover = new Float32Array(0);
+
+      ws = new WebSocket(wsUrlEl.value);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        updateStatus("Đã kết nối", true);
+        ws.send(JSON.stringify({
+          event: "start",
+          sample_rate: TARGET_SR,
+          format: "pcm16",
+          language: langEl.value || "auto",
+        }));
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          if (data.type === "ready") {
+            updateStatus("Sẵn sàng, đang ghi...");
+          } else if (data.type === "partial") {
+            // Append gọn gàng
+            if (data.text && data.text.trim()) {
+              transcriptEl.textContent += (transcriptEl.textContent ? " " : "") + data.text.trim();
+              transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            }
+          } else if (data.type === "final") {
+            updateStatus("Kết thúc phiên", true);
+          } else if (data.type === "error") {
+            updateStatus("Lỗi: " + data.message, false);
+          }
+        } catch (e) {
+          // ignore non-JSON (nếu có)
+        }
+      };
+
+      ws.onclose = () => {
+        updateStatus("Đã ngắt kết nối", false);
+      };
+
+      // Lấy micro
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+      micStream = stream;
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      inputSampleRate = audioCtx.sampleRate; // thường là 48000
+      sourceNode = audioCtx.createMediaStreamSource(stream);
+
+      // ScriptProcessor cho demo (AudioWorklet chuẩn hơn, nhưng dài hơn)
+      processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      processorNode.onaudioprocess = handleAudioProcess;
+
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioCtx.destination);
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      running = true;
+    }
+
+    async function stop() {
+      if (!running) return;
+
+      // gửi stop tới server
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ event: "stop" }));
+        }
+      } catch (e) {}
+
+      // ngắt audio graph
+      try {
+        if (processorNode) processorNode.disconnect();
+        if (sourceNode) sourceNode.disconnect();
+        if (audioCtx && audioCtx.state !== "closed") await audioCtx.close();
+      } catch (e) {}
+
+      // tắt mic
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+      }
+
+      // đóng ws
+      try { ws && ws.close(); } catch (e) {}
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      running = false;
+      updateStatus("Đã dừng", false);
+    }
+
+    startBtn.addEventListener("click", start);
+    stopBtn .addEventListener("click", stop);
+
+    // Dọn dẹp khi đóng tab
+    window.addEventListener("beforeunload", stop);
+
+    // ====== Tabs ======
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        const tabName = tab.dataset.tab;
+        // Update active tab
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        // Update active content
+        document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+        document.getElementById(`${tabName}-tab`).classList.add("active");
+      });
+    });
+
+    // ====== File Upload ======
+    const fileInput = document.getElementById("fileInput");
+    const uploadArea = document.getElementById("uploadArea");
+    const fileStatus = document.getElementById("fileStatus");
+    const fileResult = document.getElementById("fileResult");
+    const progressContainer = document.getElementById("progressContainer");
+    const progressBar = document.getElementById("progressBar");
+    const fileLang = document.getElementById("fileLang");
+
+    // Drag and drop
+    uploadArea.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      uploadArea.classList.add("dragover");
+    });
+
+    uploadArea.addEventListener("dragleave", () => {
+      uploadArea.classList.remove("dragover");
+    });
+
+    uploadArea.addEventListener("drop", (e) => {
+      e.preventDefault();
+      uploadArea.classList.remove("dragover");
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        fileInput.files = files;
+        handleFileUpload(files[0]);
+      }
+    });
+
+    // Button riêng để chọn file
+    const selectFileBtn = document.getElementById("selectFileBtn");
+    selectFileBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      fileInput.click();
+    });
+
+    // Click vào upload area (ngoài button) cũng mở dialog
+    uploadArea.addEventListener("click", (e) => {
+      // Chỉ mở dialog nếu click vào area, không phải button
+      if (e.target === uploadArea || (e.target.tagName !== "BUTTON" && !e.target.closest("button"))) {
+        fileInput.click();
+      }
+    });
+
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files.length > 0) {
+        handleFileUpload(e.target.files[0]);
+      }
+    });
+
+    async function handleFileUpload(file) {
+      fileResult.innerHTML = "";
+      fileStatus.textContent = `Đang xử lý: ${file.name}...`;
+      fileStatus.style.color = "#6b7280";
+      progressContainer.style.display = "block";
+      progressBar.style.width = "0%";
+
+      const formData = new FormData();
+      formData.append("file", file);
+      const lang = fileLang.value;
+      if (lang && lang !== "auto") {
+        formData.append("language", lang);
+      }
+
+      try {
+        const xhr = new XMLHttpRequest();
+        
+        xhr.upload.addEventListener("progress", (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            progressBar.style.width = percent + "%";
+          }
+        });
+
+        xhr.addEventListener("load", () => {
+          progressBar.style.width = "100%";
+          if (xhr.status === 200) {
+            const result = JSON.parse(xhr.responseText);
+            if (result.success) {
+              displayResult(result);
+              fileStatus.textContent = `Hoàn thành: ${file.name}`;
+              fileStatus.style.color = "#16a34a";
+            } else {
+              throw new Error(result.error || "Unknown error");
+            }
+          } else {
+            throw new Error(`HTTP ${xhr.status}: ${xhr.statusText}`);
+          }
+        });
+
+        xhr.addEventListener("error", () => {
+          throw new Error("Network error");
+        });
+
+        // Gửi request
+        xhr.open("POST", "/api/transcribe");
+        xhr.send(formData);
+
+      } catch (error) {
+        fileStatus.textContent = `Lỗi: ${error.message}`;
+        fileStatus.style.color = "#dc2626";
+        fileResult.innerHTML = `<p style="color: #dc2626;">Lỗi: ${error.message}</p>`;
+        progressContainer.style.display = "none";
+      }
+    }
+
+    function displayResult(result) {
+      let html = `<h3>📄 ${result.filename}</h3>`;
+      
+      if (result.language) {
+        html += `<p><strong>Ngôn ngữ phát hiện:</strong> ${result.language} (${(result.language_probability * 100).toFixed(1)}%)</p>`;
+      }
+
+      html += `<h4>Full Transcript:</h4>`;
+      html += `<div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin: 12px 0; white-space: pre-wrap; line-height: 1.6;">${result.text || result.full_text || "Không có transcript"}</div>`;
+
+      if (result.segments && result.segments.length > 0) {
+        html += `<h4>Segments (có timestamp):</h4>`;
+        result.segments.forEach(seg => {
+          const timeStr = `${formatTime(seg.start)} → ${formatTime(seg.end)}`;
+          html += `<div class="segment-item">
+            <span class="segment-time">${timeStr}</span>
+            <span>${seg.text}</span>
+          </div>`;
+        });
+      }
+
+      fileResult.innerHTML = html;
+    }
+
+    function formatTime(seconds) {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      const ms = Math.floor((seconds % 1) * 100);
+      return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+    }
+  </script>
+</body>
+</html>
