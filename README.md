@@ -1,21 +1,25 @@
 # 🎙️ Realtime Transcript
 
-Ứng dụng web chuyển đổi giọng nói thành văn bản (Speech-to-Text) theo thời gian thực và từ file audio/video, sử dụng OpenAI Whisper model qua `faster-whisper`.
+Ứng dụng web chuyển đổi giọng nói thành văn bản (Speech-to-Text) theo thời gian thực và từ file audio/video.
+
+- Hỗ trợ 2 backend model:
+  - Whisper (qua `faster-whisper`) — mặc định, tối ưu realtime
+  - SenseVoice (qua `funasr`) — thay thế, có fallback timestamp cho file upload
 
 ## ✨ Tính năng
 
-- **Realtime Transcription**: Chuyển đổi giọng nói thành văn bản theo thời gian thực qua WebSocket
-- **File Upload**: Upload và transcribe file audio/video (mp3, wav, m4a, mp4, avi, mov, ...)
+- **Realtime Transcription**: Chuyển đổi giọng nói thành văn bản theo thời gian thực qua WebSocket (stream Full Transcript + Segments có timestamp)
+- **File Upload**: Upload và transcribe file audio/video (mp3, wav, m4a, mp4, avi, mov, ...), trả về full transcript và danh sách segments có timestamp
 - **Đa ngôn ngữ**: Hỗ trợ nhiều ngôn ngữ với tự động phát hiện ngôn ngữ
-- **Timestamps**: Hiển thị timestamp cho từng đoạn transcript
+- **Timestamps**: Realtime có timestamp theo buffer; Upload có timestamp từ model hoặc được suy đoán (fallback) theo độ dài nội dung
 - **Drag & Drop**: Kéo thả file để upload dễ dàng
 - **Progress Tracking**: Theo dõi tiến trình upload và xử lý
 
 ## 🏗️ Kiến trúc
 
-- **Backend**: FastAPI với WebSocket cho realtime transcription
+- **Backend**: FastAPI (WebSocket cho realtime, REST cho upload)
 - **Frontend**: HTML/JavaScript với WebSocket client
-- **Model**: OpenAI Whisper (qua `faster-whisper`)
+- **Model**: Whisper (`faster-whisper`) hoặc SenseVoice (`funasr`)
 
 ## 📋 Yêu cầu hệ thống
 
@@ -70,13 +74,15 @@ cd backend
 pip install -r requirements.txt
 ```
 
-**Lưu ý**: Nếu có GPU và muốn sử dụng CUDA:
-- Đảm bảo đã cài đặt CUDA toolkit
-- Sử dụng `onnxruntime-gpu` (đã có trong requirements.txt)
+**GPU (CUDA)**
+- Khuyến nghị CUDA 12.1 + cuDNN 9
+- Dự án có sẵn script để set môi trường CUDA/cuDNN và chạy server:
+  - Whisper: `backend/run_main_with_cuda.sh`
+  - SenseVoice: `backend/run_main_sensevoice_with_cuda.sh`
 
 ### 4. Cấu hình model (tùy chọn)
 
-Chỉnh sửa `backend/main.py` để thay đổi model và device:
+Chỉnh sửa `backend/main.py` (Whisper) hoặc `backend/main_sensevoice.py` (SenseVoice) để thay đổi model và device:
 
 ```python
 MODEL_NAME = "small"   # "small" (nhanh), "medium" (chính xác), "large-v3" (nặng)
@@ -85,8 +91,10 @@ COMPUTE_TYPE = "int8"  # "float16" trên GPU, "int8" hoặc "int8_float16" trên
 ```
 
 **Khuyến nghị:**
-- **CPU**: `MODEL_NAME = "small"`, `DEVICE = "cpu"`, `COMPUTE_TYPE = "int8"`
-- **GPU**: `MODEL_NAME = "medium"`, `DEVICE = "cuda"`, `COMPUTE_TYPE = "float16"`
+- Whisper + CPU: `MODEL_NAME = "small"`, `DEVICE = "cpu"`, `COMPUTE_TYPE = "int8"`
+- Whisper + GPU: `MODEL_NAME = "medium"`, `DEVICE = "cuda"`, `COMPUTE_TYPE = "float16"`
+- SenseVoice + GPU: `DEVICE = "cuda"`
+- SenseVoice + CPU: `DEVICE = "cpu"`
 
 ## ▶️ Chạy ứng dụng
 
@@ -97,6 +105,16 @@ python main.py
 ```
 
 Server sẽ chạy tại: `http://localhost:8917`
+
+### Chạy với CUDA (nếu có GPU)
+```bash
+cd backend
+./run_main_with_cuda.sh          # Whisper
+# hoặc
+./run_main_sensevoice_with_cuda.sh  # SenseVoice
+```
+
+Các script trên tự cấu hình `LD_LIBRARY_PATH` cho cuDNN.
 
 ### Truy cập ứng dụng
 Mở trình duyệt và truy cập: `http://localhost:8917`
@@ -122,9 +140,9 @@ Kết nối WebSocket để realtime transcription.
 
 3. Server trả về:
 ```json
-{"type": "ready"}  // Khi sẵn sàng
-{"type": "partial", "text": "..."}  // Transcript từng đoạn
-{"type": "final", "text": ""}  // Khi stop
+{"type": "ready"}
+{"type": "partial", "text": "...", "segments": [{"start": 0.0, "end": 1.0, "text": "..."}]}
+{"type": "final", "text": ""}
 {"type": "error", "message": "..."}  // Nếu có lỗi
 ```
 
@@ -150,7 +168,6 @@ Upload file audio/video để transcribe.
   "success": true,
   "filename": "audio.mp3",
   "text": "Full transcript text...",
-  "full_text": "Full transcript with line breaks...",
   "segments": [
     {
       "start": 0.0,
@@ -191,7 +208,9 @@ realtime-transcript/
 1. Mở tab **"Realtime"**
 2. Chọn ngôn ngữ (hoặc "Tự động")
 3. Nhấn **"Start"** và cho phép truy cập microphone
-4. Bắt đầu nói, transcript sẽ hiển thị theo thời gian thực
+4. Bắt đầu nói, transcript sẽ hiển thị theo thời gian thực theo 2 phần:
+   - Full Transcript: nối liên tục nội dung
+   - Segments: danh sách các đoạn có timestamp (start → end)
 5. Nhấn **"Stop"** để dừng
 
 ### Upload File
@@ -200,7 +219,7 @@ realtime-transcript/
 2. Chọn ngôn ngữ (hoặc "Tự động")
 3. Kéo thả file vào vùng upload hoặc click **"Chọn File"**
 4. Chờ xử lý (progress bar sẽ hiển thị)
-5. Xem kết quả transcript với timestamps
+5. Xem kết quả transcript với timestamps (segments)
 
 ## ⚙️ Cấu hình nâng cao
 
@@ -256,6 +275,15 @@ Trong `transcribe_file()`:
 - **Kiểm tra**: Đảm bảo server đang chạy
 - **Kiểm tra**: URL WebSocket đúng (ws://localhost:8917/ws)
 
+### CUDA/cuDNN không tìm thấy (libcudnn_ops.so.*)
+- Dùng script:
+  - Whisper: `backend/run_main_with_cuda.sh`
+  - SenseVoice: `backend/run_main_sensevoice_with_cuda.sh`
+- Hoặc tự set:
+  ```bash
+  export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cudnn/lib:$CONDA_PREFIX/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH"
+  ```
+
 ## 📝 Ghi chú
 
 - Model Whisper được tải tự động lần đầu chạy
@@ -269,9 +297,10 @@ Xem `backend/requirements.txt` để biết danh sách đầy đủ.
 
 **Chính:**
 - `fastapi`: Web framework
-- `faster-whisper`: Whisper model implementation
 - `uvicorn`: ASGI server
 - `numpy`: Xử lý audio
+- `faster-whisper`: Whisper backend
+- `funasr`: SenseVoice backend
 
 ## 📄 License
 

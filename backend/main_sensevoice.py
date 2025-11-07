@@ -153,7 +153,7 @@ async def run_transcribe_on_buffer(audio_buffer: bytes, lang_hint: Optional[str]
                         segments_list.append({
                             "start": round(r["timestamp"][0] + time_offset, 2),
                             "end": round(r["timestamp"][1] + time_offset, 2),
-                            "text": text,
+                            "text": re.sub(r"<\|[^|>]+\|>", "", text).strip(),
                         })
                     else:
                         # Ước tính timestamp từ buffer size
@@ -161,11 +161,11 @@ async def run_transcribe_on_buffer(audio_buffer: bytes, lang_hint: Optional[str]
                         segments_list.append({
                             "start": round(time_offset, 2),
                             "end": round(time_offset + buffer_duration, 2),
-                            "text": text,
+                            "text": re.sub(r"<\|[^|>]+\|>", "", text).strip(),
                         })
 
         return {
-            "text": " ".join(texts).strip(),
+            "text": re.sub(r"<\|[^|>]+\|>", "", " ".join(texts)).strip(),
             "segments": segments_list,
         }
     except Exception as e:
@@ -194,14 +194,14 @@ async def transcribe_file(file_path: str, lang_hint: Optional[str] = None) -> di
                     segments.append({
                         "start": round(r["timestamp"][0], 2),
                         "end": round(r["timestamp"][1], 2),
-                        "text": r["text"]
+                        "text": re.sub(r"<\|[^|>]+\|>", "", r["text"]).strip()
                     })
         # Nếu model không trả timestamp, synthesize segments dựa trên tổng thời lượng media
         if not segments and texts:
             duration = get_media_duration_seconds(file_path)
             # print(f"Duration: {duration}")
             if duration and duration > 0:
-                total_chars = sum(len(re.sub(r"<\|[^|>]+\|>", "", t).strip().strip()) for t in texts if t and t.strip())
+                total_chars = sum(len(re.sub(r"<\|[^|>]+\|>", "", t).strip()) for t in texts if t and t.strip())
                 # print(f"Total chars: {total_chars}")
                 # Nếu không tính được độ dài, tạo 1 segment duy nhất
                 if total_chars <= 0:
