@@ -33,4 +33,4 @@ echo "Starting server with CUDA support..."
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 
 # Chạy server
-CUDA_VISIBLE_DEVICES=1 uvicorn main_sensevoice:app --reload --host 0.0.0.0 --port 8917
+CUDA_VISIBLE_DEVICES=1 uvicorn main_sensevoice:app --reload --host 0.0.0.0 --port 8918

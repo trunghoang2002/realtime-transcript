@@ -15,6 +15,7 @@
     #bar { height: 100%; width: 0%; background: #16a34a; transition: width .05s linear; }
     #status { font-size: 14px; color: #6b7280; }
     #transcript { width: 100%; min-height: 220px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fafafa; line-height: 1.65; }
+    #fullTranscriptText { white-space: pre-line;}
     label { font-size: 14px; color: #374151; }
     select, input[type="text"] { padding: 8px 10px; border-radius: 8px; border: 1px solid #e5e7eb; }
     .tag { display: inline-block; padding: 4px 8px; background: #eef2ff; color: #3730a3; border-radius: 999px; font-size: 12px; }
@@ -50,7 +51,7 @@
   <div id="realtime-tab" class="tab-content active">
     <div class="row">
       <label>WebSocket URL:</label>
-      <input id="wsUrl" type="text" value="ws://localhost:8917/ws" style="width: 360px;">
+      <input id="wsUrl" type="text" value="" style="width: 360px;" placeholder="Tự động detect từ backend...">
       <span class="tag">PCM16 @ 16kHz</span>
     </div>
 
@@ -73,12 +74,14 @@
       <span id="levelText">0%</span>
     </div>
 
-    <div id="realtimeFullTranscript" style="margin-top: 20px;">
+    <p id="realtimeLanguageContainer" style="display: none;"><strong>Ngôn ngữ phát hiện:</strong><span id="realtimeLanguage"></span></p>
+
+    <div id="realtimeFullTranscript" style="margin-top: 20px; display: none;">
       <h4>Full Transcript:</h4>
       <div id="fullTranscriptText" style="background: #f9fafb; padding: 16px; border-radius: 8px; margin: 12px 0; white-space: pre-wrap; line-height: 1.6; min-height: 100px; max-height: 300px; overflow-y: auto;"></div>
     </div>
 
-    <div id="realtimeSegments" style="margin-top: 20px;">
+    <div id="realtimeSegments" style="margin-top: 20px; display: none;">
       <h4>Segments (có timestamp):</h4>
       <div id="segmentsList" style="max-height: 400px; overflow-y: auto;"></div>
     </div>
@@ -112,6 +115,32 @@
   </div>
 
   <script>
+    // ====== Tự động detect WebSocket URL từ backend port ======
+    function getWebSocketUrl() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const hostname = window.location.hostname;
+      let port = window.location.port;
+      
+      // Nếu không có port trong URL (default port), không thêm port vào WebSocket URL
+      // Vì WebSocket sẽ tự động dùng default port (80 cho ws, 443 cho wss)
+      if (!port || port === '') {
+        return `${protocol}//${hostname}/ws`;
+      }
+      
+      return `${protocol}//${hostname}:${port}/ws`;
+    }
+
+    // Set WebSocket URL mặc định khi page load
+    window.addEventListener('DOMContentLoaded', () => {
+      const wsUrlEl = document.getElementById("wsUrl");
+      if (wsUrlEl) {
+        // Chỉ set nếu chưa có giá trị hoặc là giá trị mặc định cũ
+        if (!wsUrlEl.value || wsUrlEl.value === "ws://localhost:8917/ws") {
+          wsUrlEl.value = getWebSocketUrl();
+        }
+      }
+    });
+
     // ====== Audio capture + downsample (to 16kHz mono) + PCM16LE ======
     let audioCtx, micStream, sourceNode, processorNode;
     let ws;
@@ -126,6 +155,10 @@
     const segmentsListEl = document.getElementById("segmentsList");
     const barEl = document.getElementById("bar");
     const levelTextEl = document.getElementById("levelText");
+    const realtimeLanguageEl = document.getElementById("realtimeLanguage");
+    const realtimeLanguageContainer = document.getElementById("realtimeLanguageContainer");
+    const realtimeFullTranscript = document.getElementById("realtimeFullTranscript");
+    const realtimeSegments = document.getElementById("realtimeSegments");
 
     // Buffer để gom dữ liệu trước khi resample
     // Gửi frame cỡ 40ms để latency thấp (~640 samples @ 16kHz -> 1280 bytes)
@@ -215,7 +248,13 @@
       if (running) return;
       fullTranscriptEl.textContent = "";  // Clear full transcript
       segmentsListEl.innerHTML = "";     // Clear segments list
+      realtimeLanguageEl.textContent = ""; // Clear realtime language
       leftover = new Float32Array(0);
+
+      // Hiển thị các phần tử khi bắt đầu
+      realtimeLanguageContainer.style.display = "block";
+      realtimeFullTranscript.style.display = "block";
+      realtimeSegments.style.display = "block";
 
       ws = new WebSocket(wsUrlEl.value);
       ws.binaryType = "arraybuffer";
@@ -237,27 +276,23 @@
             updateStatus("Sẵn sàng, đang ghi...");
           } else if (data.type === "partial") {
             // Stream vào Full Transcript
-            if (data.segments && data.segments.length > 0) {
-              data.segments.forEach(seg => {
-                if (seg.text && seg.text.trim()) {
-                  const currentText = fullTranscriptEl.textContent;
-                  if (currentText) {
-                    fullTranscriptEl.textContent = currentText + seg.text.trim();
-                  } else {
-                    fullTranscriptEl.textContent = seg.text.trim();
-                  }
-                }
-              });
-              // Auto scroll
-              fullTranscriptEl.scrollTop = fullTranscriptEl.scrollHeight;
-            } else if (data.text && data.text.trim()) {
+            if (data.text && data.text.trim()) {
               // Fallback: nếu không có segments, append text với space
               const currentText = fullTranscriptEl.textContent;
               if (currentText) {
-                fullTranscriptEl.textContent = currentText + " " + data.text.trim();
+                console.log("data.text: ", data.text.trim());
+                if (data.text.trim().startsWith("/newline")) {
+                    fullTranscriptEl.textContent = currentText + "\n" + data.text.trim().replace("/newline", "");
+                } else {
+                  fullTranscriptEl.textContent = currentText + data.text.trim();
+                }
               } else {
-                fullTranscriptEl.textContent = data.text.trim();
+                fullTranscriptEl.textContent = data.text.trim().replace("/newline", "");
               }
+              if (data.language && data.language !== "ja") {
+                fullTranscriptEl.textContent += " "
+              }
+              realtimeLanguageEl.textContent = " " + data.language + " (" + (data.language_probability * 100).toFixed(1) + "%)";
               fullTranscriptEl.scrollTop = fullTranscriptEl.scrollHeight;
             }
 
@@ -268,7 +303,7 @@
                 const segmentDiv = document.createElement("div");
                 segmentDiv.className = "segment-item";
                 segmentDiv.style.margin = "8px 0";
-                segmentDiv.innerHTML = `<span class="segment-time">${timeStr}</span><span>${seg.text}</span>`;
+                segmentDiv.innerHTML = `<span class="segment-time">${timeStr}</span><span>${seg.speaker_id}: ${seg.text}</span>`;
                 segmentsListEl.appendChild(segmentDiv);
                 // Auto scroll
                 segmentsListEl.scrollTop = segmentsListEl.scrollHeight;
@@ -481,7 +516,7 @@
           const timeStr = `${formatTime(seg.start)} → ${formatTime(seg.end)}`;
           html += `<div class="segment-item">
             <span class="segment-time">${timeStr}</span>
-            <span>${seg.text}</span>
+            <span>${seg.speaker_id}: ${seg.text}</span>
           </div>`;
         });
       }

@@ -67,8 +67,108 @@ if DEVICE == "cuda":
 # -------- Whisper model ----------
 # Model gợi ý: "small" (nhanh) / "medium" (chính xác) / "large-v3" (nặng)
 from faster_whisper import WhisperModel
+from silero_vad import VadOptions, get_speech_timestamps, collect_chunks
+from get_audio import decode_audio
 
 model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
+
+# Patch SpeechBrain compatibility issue với huggingface_hub
+import fix_speechbrain  # Phải import TRƯỚC speechbrain
+from speechbrain.inference import EncoderClassifier
+import torch
+
+# Load speaker embedding model
+spk_model = EncoderClassifier.from_hparams(
+    source="speechbrain/spkrec-ecapa-voxceleb",
+    run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+)
+registered_speakers = []  # lưu danh sách các vector trung bình của speaker
+speaker_counts = []  # số lần đã thấy speaker này (để tính moving average)
+speaker_threshold = 0.5  # cosine similarity ngưỡng nhận cùng người nói
+update_alpha = 0.3  # hệ số cho exponential moving average khi update embedding
+min_audio_length = 8000  # minimum 0.5 giây (16kHz) - chỉ pad khi quá ngắn
+
+def get_speaker_id(audio_f32: np.ndarray, debug=False, max_speakers=None):
+    """Nhận diện người nói bằng cosine similarity với cải thiện stability."""
+
+    # === Reject nếu audio rỗng ===
+    if audio_f32 is None or len(audio_f32) == 0:
+        return "unknown"
+
+    # Chỉ pad khi audio quá ngắn (< 0.5s), lặp lại audio thay vì padding zeros
+    if len(audio_f32) < min_audio_length:
+        pad_length = min_audio_length - len(audio_f32)
+        pad_start = pad_length // 2
+        pad_end = pad_length - pad_start
+        
+        # Clamp lại để không vượt quá độ dài audio
+        pad_start = min(pad_start, len(audio_f32))
+        pad_end = min(pad_end, len(audio_f32))
+
+        # Lặp lại audio thay vì padding zeros - tốt hơn cho speaker recognition
+        # Lặp lại phần cuối ở đầu, và phần đầu ở cuối (symmetric repetition)
+        if len(audio_f32) > 0:
+            # Lặp lại phần cuối audio ở đầu
+            repeat_start = audio_f32[-pad_start:] if pad_start > 0 else np.array([], dtype=audio_f32.dtype)
+            # Lặp lại phần đầu audio ở cuối
+            repeat_end = audio_f32[:pad_end] if pad_end > 0 else np.array([], dtype=audio_f32.dtype)
+            
+            audio_f32 = np.concatenate([
+                repeat_start,
+                audio_f32,
+                repeat_end
+            ])
+    
+    # === Trích embedding ===
+    # SpeechBrain yêu cầu tensor shape (batch, time)
+    try:
+        tensor = torch.tensor(audio_f32).unsqueeze(0)
+        with torch.no_grad():
+            emb = spk_model.encode_batch(tensor).detach().cpu().numpy().mean(axis=1)[0]
+    except Exception:
+        return "unknown"
+    
+    # Normalize embedding để ổn định hơn
+    emb_norm = emb / (np.linalg.norm(emb) + 1e-8)
+
+    # Nếu chưa có người nói nào, tạo mới
+    if not registered_speakers:
+        registered_speakers.append(emb_norm)
+        speaker_counts.append(1)
+        return "spk_01"
+
+    # So khớp cosine với danh sách speaker đã biết (đã normalize nên chỉ cần dot product)
+    sims = [np.dot(emb_norm, s) for s in registered_speakers]
+    max_sim = max(sims)
+    idx = np.argmax(sims)
+    
+    if debug:
+        print(f"  Similarities: {[f'{s:.3f}' for s in sims]}, max={max_sim:.3f}")
+
+    # === Nếu mới chỉ có 1 speaker duy nhất và speaker_count = 1 thì giảm ngưỡng ===
+    if len(registered_speakers) == 1 and speaker_counts[0] == 1:
+        speaker_threshold = 0.3
+    else:
+        speaker_threshold = 0.5
+
+    # === Nếu giống speaker cũ ===
+    if max_sim > speaker_threshold:
+        # Update speaker embedding với exponential moving average để ổn định hơn
+        registered_speakers[idx] = (1 - update_alpha) * registered_speakers[idx] + update_alpha * emb_norm
+        speaker_counts[idx] += 1
+        return f"spk_{idx+1:02d}"
+    
+    # === Nếu vượt quá số speaker cho phép → gán speaker gần nhất
+    if max_speakers is not None and len(registered_speakers) >= max_speakers:
+        # Update speaker embedding với exponential moving average để ổn định hơn
+        registered_speakers[idx] = (1 - update_alpha) * registered_speakers[idx] + update_alpha * emb_norm
+        speaker_counts[idx] += 1
+        return f"spk_{idx+1:02d}"
+
+    # === Ngược lại → tạo speaker mới ===
+    registered_speakers.append(emb_norm)
+    speaker_counts.append(1)
+    return f"spk_{len(registered_speakers):02d}"
 
 # -------- App ----------
 app = FastAPI(title="Realtime Transcript API", version="1.0.0")
@@ -91,69 +191,6 @@ def pcm16_to_float32(pcm16: bytes) -> np.ndarray:
     audio_f32 = audio_i16.astype(np.float32) / 32768.0
     return audio_f32
 
-async def run_transcribe_on_buffer(
-    audio_buffer: bytes,
-    lang_hint: Optional[str] = None,
-    time_offset: float = 0.0,
-) -> dict:
-    """
-    Chạy ASR trên vùng đệm audio (PCM16 mono 16kHz).
-    Trả về dict với 'text' và 'segments' (có timestamp) của đoạn ~1s để streaming mượt.
-    """
-    audio_f32 = pcm16_to_float32(audio_buffer)
-    if audio_f32.size == 0:
-        return {"text": "", "segments": []}
-    
-    # Cần tối thiểu ~0.5s audio để transcribe (8000 samples @ 16kHz)
-    MIN_SAMPLES = 8000
-    if audio_f32.size < MIN_SAMPLES:
-        return {"text": "", "segments": []}
-    
-    # Kiểm tra audio có tín hiệu (RMS > ngưỡng nhỏ)
-    rms = np.sqrt(np.mean(audio_f32 ** 2))
-    if rms < 0.01:  # Ngưỡng im lặng
-        return {"text": "", "segments": []}
-
-    try:
-        # faster-whisper nhận numpy audio array (1-D float32, sample_rate=16000)
-        # Sử dụng vad_filter để bỏ im lặng; beam_size thấp để nhanh hơn.
-        segments, _ = model.transcribe(
-            audio_f32,
-            language=lang_hint,            # None -> auto-detect; "vi" -> tiếng Việt
-            vad_filter=True,
-            beam_size=1,
-            best_of=1,
-            condition_on_previous_text=False,  # giúp các chunk độc lập, đỡ "lệch ngữ cảnh"
-            temperature=0.0,
-        )
-
-        partial_texts = []
-        segments_list = []
-        for seg in segments:
-            # seg.text đã loại bỏ khoảng trắng đầu/cuối
-            t = seg.text.strip()
-            if t:
-                partial_texts.append(t)
-                segments_list.append({
-                    "start": round(seg.start + time_offset, 2),
-                    "end": round(seg.end + time_offset, 2),
-                    "text": t,
-                })
-
-        return {
-            "text": " ".join(partial_texts),
-            "segments": segments_list,
-        }
-    except (ValueError, RuntimeError) as e:
-        # Xử lý lỗi khi segments rỗng (ví dụ: max() arg is an empty sequence)
-        # hoặc khi audio quá ngắn/im lặng hoàn toàn
-        error_msg = str(e).lower()
-        if "empty" in error_msg or "max()" in error_msg or "sequence" in error_msg:
-            return {"text": "", "segments": []}
-        # Log lỗi khác để debug
-        print(f"Transcription error: {e}")
-        raise
-
 async def transcribe_file(
     file_path: str,
     lang_hint: Optional[str] = None,
@@ -164,35 +201,72 @@ async def transcribe_file(
     """
     try:
         # faster-whisper có thể nhận file path trực tiếp
-        segments, info = model.transcribe(
-            file_path,
-            language=lang_hint,
-            vad_filter=True,
-            beam_size=5,  # Tăng độ chính xác cho file (không cần realtime)
-            best_of=5,
-            condition_on_previous_text=True,
-            temperature=0.0,
-        )
+        audio = decode_audio(file_path)
+        duration = audio.shape[0] / 16000
+        print("duration: ", duration)
 
         full_text = []
         segments_list = []
-        
-        for seg in segments:
-            text = seg.text.strip()
-            if text:
-                full_text.append(text)
-                segments_list.append({
-                    "start": round(seg.start, 2),
-                    "end": round(seg.end, 2),
-                    "text": text,
-                })
+        info = None
 
+        # VAD filter
+        vad_options = VadOptions(min_silence_duration_ms=800)
+        speech_chunks = get_speech_timestamps(audio, vad_options)
+        # print("speech_chunks: ", speech_chunks)
+
+        # Reset registered_speakers và speaker_counts
+        global registered_speakers
+        registered_speakers = []
+        global speaker_counts
+        speaker_counts = []
+
+        for idx, chunk in enumerate(speech_chunks):
+            print(f"chunk {idx}: start={chunk['start']} - {chunk['start'] / 16000}s, end={chunk['end']} - {chunk['end'] / 16000}s")
+            
+            audio_idx = collect_chunks(audio, [chunk])
+
+            speaker_id = get_speaker_id(audio_idx, debug=True, max_speakers=2)
+            print("speaker_id: ", speaker_id)
+            print("--------------------------------")
+
+            segments, info = model.transcribe(
+                audio_idx,
+                language=lang_hint,
+                vad_filter=False,
+                beam_size=5,  # Tăng độ chính xác cho file (không cần realtime)
+                best_of=5,
+                condition_on_previous_text=True,
+                temperature=0.0,
+                word_timestamps=True,
+            )
+
+            out_text = ""
+            for seg in segments:
+                # print("seg: ", seg)
+                text = seg.text.strip()
+                if text:
+                    out_text += text + "||"
+                    # segments_list.append({
+                    #     "start": round(seg.start, 2),
+                    #     "end": round(seg.end, 2),
+                    #     "text": text,
+                    # })
+            full_text.append(f"{speaker_id}: {out_text[:-2]}")
+            segments_list.append({
+                "speaker_id": speaker_id,
+                "start": round(chunk['start'] / 16000, 2),
+                "end": round(chunk['end'] / 16000, 2),
+                "text": out_text.replace("||", ""),
+            })
+        print("out_text: ", out_text)
+        # print("segments_list: ", segments_list)
+        # print("info: ", info)
         return {
-            "text": " ".join(full_text),
-            "full_text": "\n".join(full_text),  # Mỗi segment một dòng
+            "text": "\n".join(full_text).replace("||", ""),
+            "full_text": "\n".join(full_text).replace("||", ""),  # Mỗi segment một dòng
             "segments": segments_list,
-            "language": info.language,
-            "language_probability": round(info.language_probability, 3),
+            "language": info.language if info else "auto",
+            "language_probability": round(info.language_probability if info else 0, 3),
         }
     except Exception as e:
         print(f"File transcription error: {e}")
@@ -263,6 +337,93 @@ async def transcribe_uploaded_file(
             except Exception as e:
                 logger.warning(f"[API] Failed to delete temp file {tmp_path}: {e}")
 
+async def run_transcribe_on_buffer(
+    audio_buffer: bytes,
+    lang_hint: Optional[str] = None,
+    time_offset: float = 0.0,
+) -> dict:
+    """
+    Chạy ASR trên vùng đệm audio (PCM16 mono 16kHz).
+    Trả về dict với 'text' và 'segments' (có timestamp) của đoạn ~1s để streaming mượt.
+    """
+    # buffer_duration = len(audio_buffer) / 2 / 16000
+    # print("buffer_duration: ", buffer_duration)
+    audio_f32 = pcm16_to_float32(audio_buffer)
+    if audio_f32.size == 0:
+        return {"text": "", "segments": []}
+    
+    # Cần tối thiểu ~0.5s audio để transcribe (8000 samples @ 16kHz)
+    MIN_SAMPLES = 8000
+    if audio_f32.size < MIN_SAMPLES:
+        return {"text": "", "segments": []}
+    
+    # Kiểm tra audio có tín hiệu (RMS > ngưỡng nhỏ)
+    rms = np.sqrt(np.mean(audio_f32 ** 2))
+    if rms < 0.01:  # Ngưỡng im lặng
+        return {"text": "silence", "segments": []}
+
+    try:
+        # VAD filter
+        # Kiểm tra nếu audio có khoảng im lặng > 750ms trong 1s thì trả về "silence"
+        vad_options = VadOptions(min_silence_duration_ms=750)
+        speech_chunks = get_speech_timestamps(audio_f32, vad_options)
+        if len(speech_chunks) == 0:
+            return {"text": "silence", "segments": []}
+        # for idx, chunk in enumerate(speech_chunks):
+        #     print(f"chunk {idx}: start={chunk['start']} - {chunk['start'] / 16000}s, end={chunk['end']} - {chunk['end'] / 16000}s")
+        audio_f32 = collect_chunks(audio_f32, speech_chunks)
+
+        speaker_id = get_speaker_id(audio_f32, debug=True, max_speakers=2)
+        print("speaker_id: ", speaker_id)
+
+        # faster-whisper nhận numpy audio array (1-D float32, sample_rate=16000)
+        # Sử dụng vad_filter để bỏ im lặng; beam_size thấp để nhanh hơn.
+        segments, info = model.transcribe(
+            audio_f32,
+            language=lang_hint,            # None -> auto-detect; "vi" -> tiếng Việt
+            vad_filter=False,
+            beam_size=1,
+            best_of=1,
+            condition_on_previous_text=False,  # giúp các chunk độc lập, đỡ "lệch ngữ cảnh"
+            temperature=0.0,
+            word_timestamps=True,
+        )
+        # print("info: ", _)
+        # print("time_offset: ", time_offset)
+
+        partial_texts = []
+        segments_list = []
+        for seg in segments:
+            # print("seg: ", seg)
+            # seg.text đã loại bỏ khoảng trắng đầu/cuối
+            t = seg.text.strip()
+            if t:
+                partial_texts.append(t)
+                segments_list.append({
+                    "speaker_id": speaker_id,
+                    "start": round(seg.start + time_offset, 2),
+                    "end": round(seg.end + time_offset, 2),
+                    "text": t,
+                })
+
+        print("partial_texts: ", "||".join(partial_texts))
+        return {
+            "speaker_id": speaker_id,
+            "language": info.language if info else "auto",
+            "language_probability": round(info.language_probability if info else 0, 3),
+            "text": "||".join(partial_texts),
+            "segments": segments_list,
+        }
+    except (ValueError, RuntimeError) as e:
+        # Xử lý lỗi khi segments rỗng (ví dụ: max() arg is an empty sequence)
+        # hoặc khi audio quá ngắn/im lặng hoàn toàn
+        error_msg = str(e).lower()
+        if "empty" in error_msg or "max()" in error_msg or "sequence" in error_msg:
+            return {"text": "", "segments": []}
+        # Log lỗi khác để debug
+        print(f"Transcription error: {e}")
+        raise
+
 # ---- WebSocket endpoint ----
 @app.websocket("/ws")
 async def ws_transcribe(ws: WebSocket):
@@ -293,10 +454,16 @@ async def ws_transcribe(ws: WebSocket):
     recv_buffer = bytearray()
     running = True
     time_offset = 0.0  # Track thời gian tích lũy từ đầu session
+    end_speech = False
+
+    global registered_speakers
+    registered_speakers = []
+    global speaker_counts
+    speaker_counts = []
 
     async def flush_and_transcribe():
         """Chạy ASR trên buffer hiện tại và gửi partial về client."""
-        nonlocal recv_buffer, time_offset, total_segments_sent
+        nonlocal recv_buffer, time_offset, total_segments_sent, end_speech
         if len(recv_buffer) == 0:
             return
         try:
@@ -309,14 +476,30 @@ async def ws_transcribe(ws: WebSocket):
             recv_buffer = bytearray()  # reset buffer sau mỗi lần flush
             
             if result["text"]:
-                segments_count = len(result.get("segments", []))
-                total_segments_sent += segments_count
-                await ws.send_text(json.dumps({
-                    "type": "partial",
-                    "text": result["text"],
-                    "segments": result["segments"]
-                }))
-                logger.debug(f"[WS] Sent partial: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
+                if result["text"] == "silence":
+                    end_speech = True
+                    print("end_speech: ", end_speech)
+                else:
+                    segments_count = len(result.get("segments", []))
+                    total_segments_sent += segments_count
+                    # result_text = result["text"] if not end_speech else f"/newline{result['speaker_id']}: {result['text']}"
+                    result_text = result["text"] if not end_speech else f"/newline{result['speaker_id']}: {result['text']}"
+                    if result["language"] != "ja":
+                        result_text = result_text.replace("||", " ")
+                    else:
+                        result_text = result_text.replace("||", "")
+                    print("result_text: ", result_text)
+                    print("--------------------------------")
+                    await ws.send_text(json.dumps({
+                        "type": "partial",
+                        "speaker_id": result["speaker_id"],
+                        "language": result["language"],
+                        "language_probability": result["language_probability"],
+                        "text": result_text,
+                        "segments": result["segments"]
+                    }))
+                    logger.debug(f"[WS] Sent partial: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
+                    end_speech = False
             
             # Cập nhật time_offset cho chunk tiếp theo
             time_offset += buffer_duration
