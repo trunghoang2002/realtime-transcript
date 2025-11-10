@@ -4,4 +4,5 @@ faster-whisper==1.0.3
 funasr==1.2.7
 numpy==1.26.4
 onnxruntime-gpu==1.23.2
-requests
+requests==2.32.5
+git+https://github.com/speechbrain/speechbrain.git@develop
