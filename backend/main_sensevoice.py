@@ -227,7 +227,12 @@ def get_dominant_language(lang_list):
 
     return lang, round(probability, 2)
 
-async def transcribe_file(file_path: str, lang_hint: Optional[str] = None) -> dict:
+async def transcribe_file(
+    file_path: str,
+    lang_hint: Optional[str] = None,
+    detect_speaker: bool = False,
+    max_speakers: Optional[int] = 2,
+) -> dict:
     """
     Transcribe file audio/video (offline).
     """
@@ -236,6 +241,12 @@ async def transcribe_file(file_path: str, lang_hint: Optional[str] = None) -> di
     registered_speakers = []
     global speaker_counts
     speaker_counts = []
+    normalized_max_speakers: Optional[int] = None
+    if detect_speaker:
+        try:
+            normalized_max_speakers = max(1, int(max_speakers if max_speakers is not None else 2))
+        except (TypeError, ValueError):
+            normalized_max_speakers = 2
 
     try:
         res = model.generate(
@@ -295,9 +306,30 @@ async def transcribe_file(file_path: str, lang_hint: Optional[str] = None) -> di
                 # Không lấy được duration -> trả 1 segment không có timestamp cụ thể (0, 0)
                 segments = [{"start": 0.0, "end": 0.0, "text": "||".join(texts).strip()}]
 
+        waveform = None
+        if detect_speaker:
+            waveform, _ = librosa.load(file_path, sr=16000, mono=True)
+
         for seg in segments:
-            audio = collect_chunks(librosa.load(file_path, sr=16000, mono=True)[0], [{"start": round(seg["start"]*16000), "end": round(seg["end"]*16000)}])
-            seg["speaker_id"] = get_speaker_id(audio, debug=True, max_speakers=2)
+            if detect_speaker and waveform is not None:
+                start_idx = max(0, int(round(seg["start"] * 16000)))
+                end_idx = max(0, int(round(seg["end"] * 16000)))
+                start_idx = min(start_idx, len(waveform))
+                end_idx = max(end_idx, start_idx + 1600)  # ~0.1s fallback để lấy đủ mẫu
+                end_idx = min(len(waveform), end_idx)
+                if end_idx <= start_idx:
+                    end_idx = min(len(waveform), start_idx + 1600)
+                chunk = collect_chunks(
+                    waveform,
+                    [{"start": start_idx, "end": min(len(waveform), end_idx)}],
+                )
+                seg["speaker_id"] = get_speaker_id(
+                    chunk,
+                    debug=True,
+                    max_speakers=normalized_max_speakers,
+                )
+            else:
+                seg.pop("speaker_id", None)
         
         print(f"languages: {languages}")
         if lang_hint and lang_hint.lower() != "auto":
@@ -306,9 +338,16 @@ async def transcribe_file(file_path: str, lang_hint: Optional[str] = None) -> di
         else:
             dominant_lang, language_probability = get_dominant_language(languages)
 
+        def format_segment_line(segment: dict) -> str:
+            text = segment.get("text", "")
+            speaker_id = segment.get("speaker_id")
+            return f"{speaker_id}: {text}" if speaker_id else text
+
+        formatted_lines = [format_segment_line(seg) for seg in segments]
+
         return {
-            "text": "\n".join([f"{seg['speaker_id']}: {seg['text']}" for seg in segments]),
-            "full_text": "\n".join([f"{seg['speaker_id']}: {seg['text']}" for seg in segments]),
+            "text": "\n".join(formatted_lines),
+            "full_text": "\n".join(formatted_lines),
             "segments": segments,
             "language": dominant_lang,
             "language_probability": round(language_probability, 2),
@@ -319,17 +358,38 @@ async def transcribe_file(file_path: str, lang_hint: Optional[str] = None) -> di
 
 # ---- API endpoint for file upload ----
 @app.post("/api/transcribe")
-async def transcribe_uploaded_file(file: UploadFile = File(...), language: Optional[str] = Form(None)):
+async def transcribe_uploaded_file(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    detect_speaker: Optional[str] = Form("false"),
+    max_speakers: Optional[str] = Form(None),
+):
     start_time = datetime.now()
     
     if not file.filename:
         logger.warning(f"[API] POST /api/transcribe - No file provided")
         return JSONResponse(status_code=400, content={"error": "No file provided"})
 
-    logger.info(f"[API] POST /api/transcribe - Received request: filename={file.filename}, size={file.size if hasattr(file, 'size') else 'unknown'}, language={language or 'auto'}")
+    logger.info(
+        "[API] POST /api/transcribe - Received request: filename=%s, size=%s, language=%s, detect_speaker=%s, max_speakers=%s",
+        file.filename,
+        getattr(file, "size", "unknown"),
+        language or "auto",
+        detect_speaker,
+        max_speakers if max_speakers is not None else "n/a",
+    )
 
     ext = Path(file.filename).suffix.lower()
     lang_hint = language if language and language.lower() != "auto" else None
+    detect_speaker_enabled = str(detect_speaker).lower() in {"true", "1", "yes", "on"}
+    max_speakers_value: Optional[int] = None
+    if detect_speaker_enabled:
+        try:
+            max_speakers_value = int(max_speakers) if max_speakers is not None else 2
+        except (TypeError, ValueError):
+            max_speakers_value = 2
+        if max_speakers_value < 1:
+            max_speakers_value = 1
 
     # if lang_hint != "auto" and lang_hint not in VALID_LANGS:
     #     return JSONResponse(status_code=400, content={"error": "Invalid language code. Valid languages are: auto, " + ", ".join(VALID_LANGS) + "."})
@@ -344,7 +404,12 @@ async def transcribe_uploaded_file(file: UploadFile = File(...), language: Optio
             logger.info(f"[API] File saved to temp: {tmp_path}, size={file_size} bytes")
 
             logger.info(f"[API] Starting transcription for {file.filename}...")
-            result = await transcribe_file(tmp_path, lang_hint)
+            result = await transcribe_file(
+                tmp_path,
+                lang_hint,
+                detect_speaker=detect_speaker_enabled,
+                max_speakers=max_speakers_value,
+            )
             print("result.text: ", result.get("text", ""))
             
             processing_time = (datetime.now() - start_time).total_seconds()
@@ -364,7 +429,13 @@ async def transcribe_uploaded_file(file: UploadFile = File(...), language: Optio
             except Exception as e:
                 logger.warning(f"[API] Failed to delete temp file {tmp_path}: {e}")
 
-async def run_transcribe_on_buffer(audio_buffer: bytes, lang_hint: Optional[str] = None, time_offset: float = 0.0) -> dict:
+async def run_transcribe_on_buffer(
+    audio_buffer: bytes,
+    lang_hint: Optional[str] = None,
+    time_offset: float = 0.0,
+    detect_speaker: bool = False,
+    max_speakers: Optional[int] = 2,
+) -> dict:
     """
     Streaming transcript (SenseVoice).
     Trả về dict với 'text' và 'segments' (có timestamp) của đoạn ~1s audio.
@@ -383,6 +454,13 @@ async def run_transcribe_on_buffer(audio_buffer: bytes, lang_hint: Optional[str]
     if rms < 0.01:  # Ngưỡng im lặng
         return {"text": "silence", "segments": []}
 
+    normalized_max_speakers: Optional[int] = None
+    if detect_speaker:
+        try:
+            normalized_max_speakers = max(1, int(max_speakers if max_speakers is not None else 2))
+        except (TypeError, ValueError):
+            normalized_max_speakers = 2
+
     try:
         # VAD filter
         # Kiểm tra nếu audio có khoảng im lặng > 750ms trong 1s thì trả về "silence"
@@ -393,8 +471,15 @@ async def run_transcribe_on_buffer(audio_buffer: bytes, lang_hint: Optional[str]
 
         # audio_f32 = collect_chunks(audio_f32, speech_chunks)
 
-        speaker_id = get_speaker_id(collect_chunks(audio_f32, speech_chunks), debug=True, max_speakers=2)
-        print("speaker_id: ", speaker_id)
+        speaker_id = None
+        if detect_speaker:
+            speech_audio = collect_chunks(audio_f32, speech_chunks)
+            speaker_id = get_speaker_id(
+                speech_audio,
+                debug=True,
+                max_speakers=normalized_max_speakers,
+            )
+            print("speaker_id: ", speaker_id)
 
         # SenseVoice: model dùng sample_rate 16000, input là numpy.float32
         res = model.generate(
@@ -417,21 +502,22 @@ async def run_transcribe_on_buffer(audio_buffer: bytes, lang_hint: Optional[str]
                     partial_texts.append(text)
                     # Nếu có timestamp, dùng nó; nếu không, ước tính từ buffer
                     if "timestamp" in r and len(r["timestamp"]) >= 2:
-                        segments_list.append({
-                            "speaker_id": speaker_id,
+                        segment_payload = {
                             "start": round(r["timestamp"][0] + time_offset, 2),
                             "end": round(r["timestamp"][1] + time_offset, 2),
                             "text": re.sub(r"<\|[^|>]+\|>", "", text).strip(),
-                        })
+                        }
                     else:
                         # Ước tính timestamp từ buffer size
                         buffer_duration = len(audio_buffer) / 2 / 16000
-                        segments_list.append({
-                            "speaker_id": speaker_id,
+                        segment_payload = {
                             "start": round(time_offset, 2),
                             "end": round(time_offset + buffer_duration, 2),
                             "text": re.sub(r"<\|[^|>]+\|>", "", text).strip(),
-                        })
+                        }
+                    if speaker_id:
+                        segment_payload["speaker_id"] = speaker_id
+                    segments_list.append(segment_payload)
 
         print(f"languages: {languages}")
         if lang_hint and lang_hint.lower() != "auto":
@@ -465,6 +551,8 @@ async def ws_transcribe(ws: WebSocket):
     sample_rate = 16000
     lang_hint = None
     fmt = "pcm16"
+    detect_speaker_enabled = False
+    max_speakers_limit: Optional[int] = None
     total_bytes_received = 0
     total_segments_sent = 0
 
@@ -483,7 +571,13 @@ async def ws_transcribe(ws: WebSocket):
             transcribe_start = datetime.now()
             # Tính thời gian của buffer này (bytes / 2 / sample_rate = seconds)
             buffer_duration = buffer_size / 2 / sample_rate
-            result = await run_transcribe_on_buffer(bytes(recv_buffer), lang_hint, time_offset)
+            result = await run_transcribe_on_buffer(
+                bytes(recv_buffer),
+                lang_hint,
+                time_offset,
+                detect_speaker=detect_speaker_enabled,
+                max_speakers=max_speakers_limit if detect_speaker_enabled else None,
+            )
             transcribe_time = (datetime.now() - transcribe_start).total_seconds()
             recv_buffer = bytearray()
             if result["text"]:
@@ -493,7 +587,15 @@ async def ws_transcribe(ws: WebSocket):
                 else:
                     segments_count = len(result.get("segments", []))
                     total_segments_sent += segments_count
-                    result_text = result["text"] if not end_speech else f"/newline{result['speaker_id']}: {result['text']}"
+                    speaker_label = result.get("speaker_id")
+                    base_text = result.get("text", "")
+                    if end_speech:
+                        if speaker_label:
+                            result_text = f"/newline{speaker_label}: {base_text}"
+                        else:
+                            result_text = f"/newline{base_text}"
+                    else:
+                        result_text = base_text
                     if result["language"] != "ja":
                         result_text = result_text.replace("||", " ")
                     else:
@@ -501,14 +603,13 @@ async def ws_transcribe(ws: WebSocket):
                     print("result_text: ", result_text)
                     await ws.send_text(json.dumps({
                         "type": "partial",
-                        "speaker_id": result["speaker_id"],
+                        "speaker_id": speaker_label,
                         "language": result["language"],
                         "language_probability": result["language_probability"],
                         "text": result_text,
                         "segments": result["segments"]
                     }))
-                    # print("test error message")
-                    # await ws.send_text(json.dumps({"type": "error", "message": "test error message"}))
+
                     logger.debug(f"[WS] Sent partial: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
                     end_speech = False
             # Cập nhật time_offset cho chunk tiếp theo
@@ -532,13 +633,32 @@ async def ws_transcribe(ws: WebSocket):
                         lang = payload.get("language")
                         if lang and lang.lower() != "auto":
                             lang_hint = lang
+                        else:
+                            lang_hint = None
+                        detect_speaker_enabled = bool(payload.get("detect_speaker"))
+                        if detect_speaker_enabled:
+                            max_payload = payload.get("max_speakers")
+                            try:
+                                max_speakers_limit = max(1, int(max_payload)) if max_payload is not None else 2
+                            except (TypeError, ValueError):
+                                max_speakers_limit = 2
+                        else:
+                            max_speakers_limit = None
                         # Reset time offset khi bắt đầu session mới
                         time_offset = 0.0
                         recv_buffer = bytearray()
                         total_bytes_received = 0
                         total_segments_sent = 0
                         session_start = datetime.now()
-                        logger.info(f"[WS] Start event received: sample_rate={sample_rate}, format={fmt}, language={lang_hint or 'auto'}, client={client_ip}")
+                        logger.info(
+                            "[WS] Start event received: sample_rate=%s, format=%s, language=%s, detect_speaker=%s, max_speakers=%s, client=%s",
+                            sample_rate,
+                            fmt,
+                            lang_hint or "auto",
+                            detect_speaker_enabled,
+                            max_speakers_limit if max_speakers_limit is not None else "n/a",
+                            client_ip,
+                        )
                         await ws.send_text(json.dumps({"type": "ready"}))
                         logger.info(f"[WS] Ready message sent to {client_ip}")
                     elif event == "stop":

@@ -194,6 +194,8 @@ def pcm16_to_float32(pcm16: bytes) -> np.ndarray:
 async def transcribe_file(
     file_path: str,
     lang_hint: Optional[str] = None,
+    detect_speaker: bool = False,
+    max_speakers: Optional[int] = 2,
 ) -> dict:
     """
     Transcribe file audio/video.
@@ -205,7 +207,6 @@ async def transcribe_file(
         duration = audio.shape[0] / 16000
         print("duration: ", duration)
 
-        full_text = []
         segments_list = []
         info = None
 
@@ -219,15 +220,29 @@ async def transcribe_file(
         registered_speakers = []
         global speaker_counts
         speaker_counts = []
+        normalized_max_speakers: Optional[int] = None
+        if detect_speaker:
+            try:
+                normalized_max_speakers = max(1, int(max_speakers if max_speakers is not None else 2))
+            except (TypeError, ValueError):
+                normalized_max_speakers = 2
+
+        formatted_lines = []
 
         for idx, chunk in enumerate(speech_chunks):
             print(f"chunk {idx}: start={chunk['start']} - {chunk['start'] / 16000}s, end={chunk['end']} - {chunk['end'] / 16000}s")
             
             audio_idx = collect_chunks(audio, [chunk])
 
-            speaker_id = get_speaker_id(audio_idx, debug=True, max_speakers=2)
-            print("speaker_id: ", speaker_id)
-            print("--------------------------------")
+            speaker_id = None
+            if detect_speaker:
+                speaker_id = get_speaker_id(
+                    audio_idx,
+                    debug=True,
+                    max_speakers=normalized_max_speakers,
+                )
+                print("speaker_id: ", speaker_id)
+                print("--------------------------------")
 
             segments, info = model.transcribe(
                 audio_idx,
@@ -240,30 +255,31 @@ async def transcribe_file(
                 word_timestamps=True,
             )
 
-            out_text = ""
+            chunk_texts = []
             for seg in segments:
                 # print("seg: ", seg)
                 text = seg.text.strip()
                 if text:
-                    out_text += text + "||"
-                    # segments_list.append({
-                    #     "start": round(seg.start, 2),
-                    #     "end": round(seg.end, 2),
-                    #     "text": text,
-                    # })
-            full_text.append(f"{speaker_id}: {out_text[:-2]}")
-            segments_list.append({
-                "speaker_id": speaker_id,
-                "start": round(chunk['start'] / 16000, 2),
-                "end": round(chunk['end'] / 16000, 2),
-                "text": out_text.replace("||", ""),
-            })
-        print("out_text: ", out_text)
-        # print("segments_list: ", segments_list)
-        # print("info: ", info)
+                    chunk_texts.append(text)
+                    segment_entry = {
+                        "start": round(chunk['start'] / 16000, 2),
+                        "end": round(chunk['end'] / 16000, 2),
+                        "text": text,
+                    }
+                    if speaker_id:
+                        segment_entry["speaker_id"] = speaker_id
+                    segments_list.append(segment_entry)
+
+            if chunk_texts:
+                chunk_line = " ".join(chunk_texts)
+                if speaker_id:
+                    formatted_lines.append(f"{speaker_id}: {chunk_line}")
+                else:
+                    formatted_lines.append(chunk_line)
+
         return {
-            "text": "\n".join(full_text).replace("||", ""),
-            "full_text": "\n".join(full_text).replace("||", ""),  # Mỗi segment một dòng
+            "text": "\n".join(formatted_lines),
+            "full_text": "\n".join(formatted_lines),  # Mỗi segment một dòng
             "segments": segments_list,
             "language": info.language if info else "auto",
             "language_probability": round(info.language_probability if info else 0, 3),
@@ -277,6 +293,8 @@ async def transcribe_file(
 async def transcribe_uploaded_file(
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
+    detect_speaker: Optional[str] = Form("false"),
+    max_speakers: Optional[str] = Form(None),
 ):
     """
     Upload file audio/video và transcribe.
@@ -291,11 +309,27 @@ async def transcribe_uploaded_file(
             content={"error": "No file provided"}
         )
 
-    logger.info(f"[API] POST /api/transcribe - Received request: filename={file.filename}, size={file.size if hasattr(file, 'size') else 'unknown'}, language={language or 'auto'}")
+    logger.info(
+        "[API] POST /api/transcribe - Received request: filename=%s, size=%s, language=%s, detect_speaker=%s, max_speakers=%s",
+        file.filename,
+        getattr(file, "size", "unknown"),
+        language or "auto",
+        detect_speaker,
+        max_speakers if max_speakers is not None else "n/a",
+    )
 
     # Lấy extension
     ext = Path(file.filename).suffix.lower()
     lang_hint = language if language and language.lower() != "auto" else None
+    detect_speaker_enabled = str(detect_speaker).lower() in {"true", "1", "yes", "on"}
+    max_speakers_value: Optional[int] = None
+    if detect_speaker_enabled:
+        try:
+            max_speakers_value = int(max_speakers) if max_speakers is not None else 2
+        except (TypeError, ValueError):
+            max_speakers_value = 2
+        if max_speakers_value < 1:
+            max_speakers_value = 1
 
     # Lưu file tạm
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
@@ -310,7 +344,12 @@ async def transcribe_uploaded_file(
 
             # Transcribe
             logger.info(f"[API] Starting transcription for {file.filename}...")
-            result = await transcribe_file(tmp_path, lang_hint)
+            result = await transcribe_file(
+                tmp_path,
+                lang_hint,
+                detect_speaker=detect_speaker_enabled,
+                max_speakers=max_speakers_value,
+            )
             
             processing_time = (datetime.now() - start_time).total_seconds()
             segments_count = len(result.get("segments", []))
@@ -341,6 +380,8 @@ async def run_transcribe_on_buffer(
     audio_buffer: bytes,
     lang_hint: Optional[str] = None,
     time_offset: float = 0.0,
+    detect_speaker: bool = False,
+    max_speakers: Optional[int] = 2,
 ) -> dict:
     """
     Chạy ASR trên vùng đệm audio (PCM16 mono 16kHz).
@@ -362,6 +403,13 @@ async def run_transcribe_on_buffer(
     if rms < 0.01:  # Ngưỡng im lặng
         return {"text": "silence", "segments": []}
 
+    normalized_max_speakers: Optional[int] = None
+    if detect_speaker:
+        try:
+            normalized_max_speakers = max(1, int(max_speakers if max_speakers is not None else 2))
+        except (TypeError, ValueError):
+            normalized_max_speakers = 2
+
     try:
         # VAD filter
         # Kiểm tra nếu audio có khoảng im lặng > 750ms trong 1s thì trả về "silence"
@@ -373,8 +421,14 @@ async def run_transcribe_on_buffer(
         #     print(f"chunk {idx}: start={chunk['start']} - {chunk['start'] / 16000}s, end={chunk['end']} - {chunk['end'] / 16000}s")
         audio_f32 = collect_chunks(audio_f32, speech_chunks)
 
-        speaker_id = get_speaker_id(audio_f32, debug=True, max_speakers=2)
-        print("speaker_id: ", speaker_id)
+        speaker_id = None
+        if detect_speaker:
+            speaker_id = get_speaker_id(
+                audio_f32,
+                debug=True,
+                max_speakers=normalized_max_speakers,
+            )
+            print("speaker_id: ", speaker_id)
 
         # faster-whisper nhận numpy audio array (1-D float32, sample_rate=16000)
         # Sử dụng vad_filter để bỏ im lặng; beam_size thấp để nhanh hơn.
@@ -399,12 +453,14 @@ async def run_transcribe_on_buffer(
             t = seg.text.strip()
             if t:
                 partial_texts.append(t)
-                segments_list.append({
-                    "speaker_id": speaker_id,
+                segment_entry = {
                     "start": round(seg.start + time_offset, 2),
                     "end": round(seg.end + time_offset, 2),
                     "text": t,
-                })
+                }
+                if speaker_id:
+                    segment_entry["speaker_id"] = speaker_id
+                segments_list.append(segment_entry)
 
         print("partial_texts: ", "||".join(partial_texts))
         return {
@@ -444,6 +500,8 @@ async def ws_transcribe(ws: WebSocket):
     sample_rate = 16000
     lang_hint = None
     fmt = "pcm16"
+    detect_speaker_enabled = False
+    max_speakers_limit: Optional[int] = None
     total_bytes_received = 0
     total_segments_sent = 0
 
@@ -471,7 +529,13 @@ async def ws_transcribe(ws: WebSocket):
             transcribe_start = datetime.now()
             # Tính thời gian của buffer này (bytes / 2 / sample_rate = seconds)
             buffer_duration = buffer_size / 2 / sample_rate
-            result = await run_transcribe_on_buffer(bytes(recv_buffer), lang_hint, time_offset)
+            result = await run_transcribe_on_buffer(
+                bytes(recv_buffer),
+                lang_hint,
+                time_offset,
+                detect_speaker=detect_speaker_enabled,
+                max_speakers=max_speakers_limit if detect_speaker_enabled else None,
+            )
             transcribe_time = (datetime.now() - transcribe_start).total_seconds()
             recv_buffer = bytearray()  # reset buffer sau mỗi lần flush
             
@@ -482,9 +546,16 @@ async def ws_transcribe(ws: WebSocket):
                 else:
                     segments_count = len(result.get("segments", []))
                     total_segments_sent += segments_count
-                    # result_text = result["text"] if not end_speech else f"/newline{result['speaker_id']}: {result['text']}"
-                    result_text = result["text"] if not end_speech else f"/newline{result['speaker_id']}: {result['text']}"
-                    if result["language"] != "ja":
+                    speaker_label = result.get("speaker_id")
+                    base_text = result.get("text", "")
+                    if end_speech:
+                        if speaker_label:
+                            result_text = f"/newline{speaker_label}: {base_text}"
+                        else:
+                            result_text = f"/newline{base_text}"
+                    else:
+                        result_text = base_text
+                    if result.get("language") != "ja":
                         result_text = result_text.replace("||", " ")
                     else:
                         result_text = result_text.replace("||", "")
@@ -492,11 +563,11 @@ async def ws_transcribe(ws: WebSocket):
                     print("--------------------------------")
                     await ws.send_text(json.dumps({
                         "type": "partial",
-                        "speaker_id": result["speaker_id"],
-                        "language": result["language"],
-                        "language_probability": result["language_probability"],
+                        "speaker_id": speaker_label,
+                        "language": result.get("language"),
+                        "language_probability": result.get("language_probability"),
                         "text": result_text,
-                        "segments": result["segments"]
+                        "segments": result.get("segments", []),
                     }))
                     logger.debug(f"[WS] Sent partial: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
                     end_speech = False
@@ -527,13 +598,35 @@ async def ws_transcribe(ws: WebSocket):
                         lang = payload.get("language")
                         if lang and lang.lower() != "auto":
                             lang_hint = lang
+                        else:
+                            lang_hint = None
+                        detect_speaker_enabled = bool(payload.get("detect_speaker"))
+                        if detect_speaker_enabled:
+                            max_payload = payload.get("max_speakers")
+                            try:
+                                max_speakers_limit = max(1, int(max_payload)) if max_payload is not None else 2
+                            except (TypeError, ValueError):
+                                max_speakers_limit = 2
+                        else:
+                            max_speakers_limit = None
+                        # Reset speaker tracking for new session
+                        registered_speakers = []
+                        speaker_counts = []
                         # Reset time offset khi bắt đầu session mới
                         time_offset = 0.0
                         recv_buffer = bytearray()
                         total_bytes_received = 0
                         total_segments_sent = 0
                         session_start = datetime.now()
-                        logger.info(f"[WS] Start event received: sample_rate={sample_rate}, format={fmt}, language={lang_hint or 'auto'}, client={client_ip}")
+                        logger.info(
+                            "[WS] Start event received: sample_rate=%s, format=%s, language=%s, detect_speaker=%s, max_speakers=%s, client=%s",
+                            sample_rate,
+                            fmt,
+                            lang_hint or "auto",
+                            detect_speaker_enabled,
+                            max_speakers_limit if max_speakers_limit is not None else "n/a",
+                            client_ip,
+                        )
                         # OK
                         await ws.send_text(json.dumps({"type": "ready"}))
                         logger.info(f"[WS] Ready message sent to {client_ip}")

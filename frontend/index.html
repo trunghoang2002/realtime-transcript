@@ -19,6 +19,23 @@
     label { font-size: 14px; color: #374151; }
     select, input[type="text"] { padding: 8px 10px; border-radius: 8px; border: 1px solid #e5e7eb; }
     .tag { display: inline-block; padding: 4px 8px; background: #eef2ff; color: #3730a3; border-radius: 999px; font-size: 12px; }
+    .toggle-group { display: flex; align-items: center; gap: 8px; }
+    .max-speaker-container { display: none; align-items: center; gap: 8px; }
+    .max-speaker-container input { width: 80px; }
+    .segment-speaker { font-weight: 600; color: #1f2937; margin-right: 6px; }
+    .switch { position: relative; display: inline-block; width: 46px; height: 24px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #d1d5db; transition: .3s; border-radius: 999px; }
+    .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 4px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2); }
+    .switch input:checked + .slider { background-color: #2563eb; }
+    .switch input:focus + .slider { box-shadow: 0 0 1px #2563eb; }
+    .switch input:checked + .slider:before { transform: translateX(22px); }
+    #notificationContainer { position: fixed; top: 20px; right: 20px; display: flex; flex-direction: column; gap: 12px; z-index: 9999; }
+    .notification { min-width: 240px; padding: 12px 16px; border-radius: 8px; background: #1f2937; color: white; box-shadow: 0 10px 25px rgba(15, 23, 42, 0.2); font-size: 14px; line-height: 1.4; opacity: 0.95; transition: opacity 0.3s ease; cursor: pointer; }
+    .notification.error { background: #dc2626; }
+    .notification.success { background: #16a34a; }
+    .notification.info { background: #2563eb; }
+    .notification.fade-out { opacity: 0; }
     
     /* Tabs */
     .tabs { display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 2px solid #e5e7eb; }
@@ -40,6 +57,7 @@
 </head>
 <body>
   <h1>🎙️ Realtime Transcript</h1>
+  <div id="notificationContainer"></div>
   
   <!-- Tabs -->
   <div class="tabs">
@@ -67,6 +85,20 @@
       <button id="startBtn" class="primary">Start</button>
       <button id="stopBtn" class="secondary" disabled>Stop</button>
       <span id="status">Chưa kết nối</span>
+    </div>
+
+    <div class="row">
+      <div class="toggle-group">
+        <label>Detect speaker:</label>
+        <label class="switch" aria-label="Detect speaker">
+          <input type="checkbox" id="detectSpeakerToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="maxSpeakersContainer" class="max-speaker-container">
+        <label for="maxSpeakersInput">Max speaker:</label>
+        <input type="number" id="maxSpeakersInput" min="1" value="2">
+      </div>
     </div>
 
     <div class="row">
@@ -98,6 +130,20 @@
         <option value="ja">日本語</option>
       </select>
       <span id="fileStatus">Sẵn sàng upload</span>
+    </div>
+
+    <div class="row">
+      <div class="toggle-group">
+        <label>Detect speaker:</label>
+        <label class="switch" aria-label="Detect speaker for upload">
+          <input type="checkbox" id="detectSpeakerUploadToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="uploadMaxSpeakersContainer" class="max-speaker-container">
+        <label for="maxSpeakersUploadInput">Max speaker:</label>
+        <input type="number" id="maxSpeakersUploadInput" min="1" value="2">
+      </div>
     </div>
 
     <div class="upload-area" id="uploadArea">
@@ -141,6 +187,61 @@
       }
     });
 
+    function showNotification(message, type = "info", duration = 5000) {
+      const container = document.getElementById("notificationContainer");
+      if (!container || !message) return;
+
+      const note = document.createElement("div");
+      note.className = `notification ${type}`;
+      note.textContent = message;
+      container.appendChild(note);
+
+      const remove = () => {
+        note.classList.add("fade-out");
+        setTimeout(() => {
+          if (note.parentNode) {
+            note.parentNode.removeChild(note);
+          }
+        }, 300);
+      };
+
+      note.addEventListener("click", remove);
+      setTimeout(remove, duration);
+    }
+
+    function setupSpeakerToggle(toggle, container, input) {
+      if (!toggle || !container) return;
+      const updateVisibility = () => {
+        container.style.display = toggle.checked ? "flex" : "none";
+        if (toggle.checked && input) {
+          if (!input.value || Number(input.value) <= 0) {
+            input.value = 2;
+          }
+        }
+      };
+      toggle.addEventListener("change", updateVisibility);
+      updateVisibility();
+    }
+
+    function setRealtimeConfigDisabled(disabled) {
+      if (wsUrlEl) wsUrlEl.disabled = disabled;
+      if (langEl) langEl.disabled = disabled;
+      if (detectSpeakerToggle) detectSpeakerToggle.disabled = disabled;
+      if (maxSpeakersInput) maxSpeakersInput.disabled = disabled;
+    }
+
+    function setUploadConfigDisabled(disabled) {
+      const selectFileBtn = document.getElementById("selectFileBtn");
+      if (fileLang) fileLang.disabled = disabled;
+      if (detectSpeakerUploadToggle) detectSpeakerUploadToggle.disabled = disabled;
+      if (maxSpeakersUploadInput) maxSpeakersUploadInput.disabled = disabled;
+      if (selectFileBtn) selectFileBtn.disabled = disabled;
+      if (fileInput) fileInput.disabled = disabled;
+      // Optional: visually indicate disabled upload area
+      if (uploadArea) uploadArea.style.pointerEvents = disabled ? "none" : "auto";
+      if (uploadArea) uploadArea.style.opacity = disabled ? "0.7" : "1";
+    }
+
     // ====== Audio capture + downsample (to 16kHz mono) + PCM16LE ======
     let audioCtx, micStream, sourceNode, processorNode;
     let ws;
@@ -159,6 +260,9 @@
     const realtimeLanguageContainer = document.getElementById("realtimeLanguageContainer");
     const realtimeFullTranscript = document.getElementById("realtimeFullTranscript");
     const realtimeSegments = document.getElementById("realtimeSegments");
+    const detectSpeakerToggle = document.getElementById("detectSpeakerToggle");
+    const maxSpeakersContainer = document.getElementById("maxSpeakersContainer");
+    const maxSpeakersInput = document.getElementById("maxSpeakersInput");
 
     // Buffer để gom dữ liệu trước khi resample
     // Gửi frame cỡ 40ms để latency thấp (~640 samples @ 16kHz -> 1280 bytes)
@@ -251,6 +355,18 @@
       realtimeLanguageEl.textContent = ""; // Clear realtime language
       leftover = new Float32Array(0);
 
+      // Disable realtime configs while running
+      setRealtimeConfigDisabled(true);
+
+      const detectSpeakerEnabled = detectSpeakerToggle ? detectSpeakerToggle.checked : false;
+      let maxSpeakersValue = 2;
+      if (detectSpeakerEnabled && maxSpeakersInput) {
+        const parsed = parseInt(maxSpeakersInput.value, 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+          maxSpeakersValue = parsed;
+        }
+      }
+
       // Hiển thị các phần tử khi bắt đầu
       realtimeLanguageContainer.style.display = "block";
       realtimeFullTranscript.style.display = "block";
@@ -261,12 +377,17 @@
 
       ws.onopen = () => {
         updateStatus("Đã kết nối", true);
-        ws.send(JSON.stringify({
+        const startPayload = {
           event: "start",
           sample_rate: TARGET_SR,
           format: "pcm16",
           language: langEl.value || "auto",
-        }));
+          detect_speaker: detectSpeakerEnabled,
+        };
+        if (detectSpeakerEnabled) {
+          startPayload.max_speakers = maxSpeakersValue;
+        }
+        ws.send(JSON.stringify(startPayload));
       };
 
       ws.onmessage = (evt) => {
@@ -303,7 +424,22 @@
                 const segmentDiv = document.createElement("div");
                 segmentDiv.className = "segment-item";
                 segmentDiv.style.margin = "8px 0";
-                segmentDiv.innerHTML = `<span class="segment-time">${timeStr}</span><span>${seg.speaker_id}: ${seg.text}</span>`;
+                const timeSpan = document.createElement("span");
+                timeSpan.className = "segment-time";
+                timeSpan.textContent = timeStr;
+                const textSpan = document.createElement("span");
+                if (seg.speaker_id) {
+                  const speakerSpan = document.createElement("span");
+                  speakerSpan.className = "segment-speaker";
+                  speakerSpan.textContent = `${seg.speaker_id}:`;
+                  textSpan.appendChild(speakerSpan);
+                  const textContent = seg.text || "";
+                  textSpan.appendChild(document.createTextNode(textContent ? ` ${textContent}` : ""));
+                } else {
+                  textSpan.textContent = seg.text || "";
+                }
+                segmentDiv.appendChild(timeSpan);
+                segmentDiv.appendChild(textSpan);
                 segmentsListEl.appendChild(segmentDiv);
                 // Auto scroll
                 segmentsListEl.scrollTop = segmentsListEl.scrollHeight;
@@ -313,6 +449,8 @@
             updateStatus("Kết thúc phiên", true);
           } else if (data.type === "error") {
             updateStatus("Lỗi: " + data.message, false);
+            showNotification(data.message || "Có lỗi xảy ra trong quá trình xử lý.", "error");
+            stop({ silent: true });
           }
         } catch (e) {
           // ignore non-JSON (nếu có)
@@ -321,6 +459,8 @@
 
       ws.onclose = () => {
         updateStatus("Đã ngắt kết nối", false);
+        // Re-enable realtime configs when disconnected
+        setRealtimeConfigDisabled(false);
       };
 
       // Lấy micro
@@ -343,7 +483,14 @@
       running = true;
     }
 
-    async function stop() {
+    async function stop(arg) {
+      const isEvent = arg && typeof arg.preventDefault === "function";
+      if (isEvent) {
+        arg.preventDefault();
+      }
+      const options = isEvent ? {} : (arg || {});
+      const { silent = false } = options;
+
       if (!running) return;
 
       // gửi stop tới server
@@ -371,7 +518,11 @@
       startBtn.disabled = false;
       stopBtn.disabled = true;
       running = false;
-      updateStatus("Đã dừng", false);
+      if (!silent) {
+        updateStatus("Đã dừng", false);
+      }
+      // Re-enable realtime configs after stopping
+      setRealtimeConfigDisabled(false);
     }
 
     startBtn.addEventListener("click", start);
@@ -401,6 +552,12 @@
     const progressContainer = document.getElementById("progressContainer");
     const progressBar = document.getElementById("progressBar");
     const fileLang = document.getElementById("fileLang");
+    const detectSpeakerUploadToggle = document.getElementById("detectSpeakerUploadToggle");
+    const uploadMaxSpeakersContainer = document.getElementById("uploadMaxSpeakersContainer");
+    const maxSpeakersUploadInput = document.getElementById("maxSpeakersUploadInput");
+
+    setupSpeakerToggle(detectSpeakerToggle, maxSpeakersContainer, maxSpeakersInput);
+    setupSpeakerToggle(detectSpeakerUploadToggle, uploadMaxSpeakersContainer, maxSpeakersUploadInput);
 
     // Drag and drop
     uploadArea.addEventListener("dragover", (e) => {
@@ -445,17 +602,45 @@
     });
 
     async function handleFileUpload(file) {
+      // If upload UI is disabled, ignore accidental triggers
+      if (fileInput && fileInput.disabled) return;
+
+      const handleUploadError = (message) => {
+        fileStatus.textContent = `Lỗi: ${message}`;
+        fileStatus.style.color = "#dc2626";
+        fileResult.innerHTML = `<p style="color: #dc2626;">Lỗi: ${message}</p>`;
+        progressContainer.style.display = "none";
+        fileInput.value = "";
+        showNotification(message, "error");
+        setUploadConfigDisabled(false);
+      };
+
       fileResult.innerHTML = "";
       fileStatus.textContent = `Đang xử lý: ${file.name}...`;
       fileStatus.style.color = "#6b7280";
       progressContainer.style.display = "block";
       progressBar.style.width = "0%";
 
+      // Disable upload configs while processing
+      setUploadConfigDisabled(true);
+
       const formData = new FormData();
       formData.append("file", file);
       const lang = fileLang.value;
       if (lang && lang !== "auto") {
         formData.append("language", lang);
+      }
+      const detectSpeakerForUpload = detectSpeakerUploadToggle ? detectSpeakerUploadToggle.checked : false;
+      formData.append("detect_speaker", detectSpeakerForUpload ? "true" : "false");
+      if (detectSpeakerForUpload) {
+        let uploadMaxSpeakers = 2;
+        if (maxSpeakersUploadInput) {
+          const parsed = parseInt(maxSpeakersUploadInput.value, 10);
+          if (!Number.isNaN(parsed) && parsed > 0) {
+            uploadMaxSpeakers = parsed;
+          }
+        }
+        formData.append("max_speakers", String(uploadMaxSpeakers));
       }
 
       try {
@@ -471,21 +656,36 @@
         xhr.addEventListener("load", () => {
           progressBar.style.width = "100%";
           if (xhr.status === 200) {
-            const result = JSON.parse(xhr.responseText);
+            let result;
+            try {
+              result = JSON.parse(xhr.responseText);
+            } catch (parseError) {
+              handleUploadError("Phản hồi từ server không hợp lệ.");
+              return;
+            }
+
             if (result.success) {
               displayResult(result);
               fileStatus.textContent = `Hoàn thành: ${file.name}`;
               fileStatus.style.color = "#16a34a";
+              showNotification(`Xử lý thành công: ${file.name}`, "success");
             } else {
-              throw new Error(result.error || "Unknown error");
+              handleUploadError(result.error || "Server trả về lỗi.");
             }
           } else {
-            throw new Error(`HTTP ${xhr.status}: ${xhr.statusText}`);
+            handleUploadError(`HTTP ${xhr.status}: ${xhr.statusText || "Unknown status"}`);
           }
         });
 
         xhr.addEventListener("error", () => {
-          throw new Error("Network error");
+          handleUploadError("Không thể kết nối tới server.");
+        });
+
+        xhr.addEventListener("loadend", () => {
+          // Reset file input để có thể upload lại cùng file
+          fileInput.value = "";
+          // Re-enable upload configs after completion
+          setUploadConfigDisabled(false);
         });
 
         // Gửi request
@@ -493,10 +693,7 @@
         xhr.send(formData);
 
       } catch (error) {
-        fileStatus.textContent = `Lỗi: ${error.message}`;
-        fileStatus.style.color = "#dc2626";
-        fileResult.innerHTML = `<p style="color: #dc2626;">Lỗi: ${error.message}</p>`;
-        progressContainer.style.display = "none";
+        handleUploadError(error.message || "Có lỗi không xác định xảy ra.");
       }
     }
 
@@ -514,9 +711,10 @@
         html += `<h4>Segments (có timestamp):</h4>`;
         result.segments.forEach(seg => {
           const timeStr = `${formatTime(seg.start)} → ${formatTime(seg.end)}`;
+          const speakerPrefix = seg.speaker_id ? `<span class="segment-speaker">${seg.speaker_id}:</span> ` : "";
           html += `<div class="segment-item">
             <span class="segment-time">${timeStr}</span>
-            <span>${seg.speaker_id}: ${seg.text}</span>
+            <span>${speakerPrefix}${seg.text}</span>
           </div>`;
         });
       }
