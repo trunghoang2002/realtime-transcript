@@ -354,11 +354,24 @@ async def transcribe_uploaded_file(
             processing_time = (datetime.now() - start_time).total_seconds()
             segments_count = len(result.get("segments", []))
             text_length = len(result.get("text", ""))
-            logger.info(f"[API] POST /api/transcribe - Completed: filename={file.filename}, processing_time={processing_time:.2f}s, segments={segments_count}, text_length={text_length}")
+            # Tính RTF
+            audio_duration = decode_audio(tmp_path).shape[0] / 16000
+            rtf = round(processing_time / audio_duration, 3) if audio_duration and audio_duration > 0 else None
+
+            logger.info(
+                "[API] POST /api/transcribe - Completed: filename=%s, processing_time=%.2fs, audio_duration=%.2fs, rtf=%s, segments=%s, text_length=%s",
+                file.filename,
+                processing_time,
+                audio_duration,
+                f"{rtf:.3f}" if isinstance(rtf, float) else "n/a",
+                segments_count,
+                text_length,
+            )
             
             return JSONResponse(content={
                 "success": True,
                 "filename": file.filename,
+                "rtf": rtf,
                 **result
             })
         except Exception as e:
