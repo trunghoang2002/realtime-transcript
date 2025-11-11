@@ -668,7 +668,15 @@
               displayResult(result);
               fileStatus.textContent = `Hoàn thành: ${file.name}`;
               fileStatus.style.color = "#16a34a";
-              showNotification(`Xử lý thành công: ${file.name}`, "success");
+              
+              // Tạo notification message với RTF nếu có
+              let notificationMsg = `Xử lý thành công: ${file.name}`;
+              if (result.rtf !== null && result.rtf !== undefined) {
+                const rtfValue = typeof result.rtf === 'number' ? result.rtf.toFixed(3) : result.rtf;
+                const rtfStatus = result.rtf < 1.0 ? '⚡' : (result.rtf <= 1.0 ? '✓' : '⚠️');
+                notificationMsg += ` (RTF: ${rtfValue} ${rtfStatus})`;
+              }
+              showNotification(notificationMsg, "success");
             } else {
               handleUploadError(result.error || "Server trả về lỗi.");
             }

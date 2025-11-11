@@ -1,6 +1,16 @@
 #!/bin/bash
 # Script để chạy server với CUDA/cuDNN đã được setup
 
+RELOAD_FLAG=""
+
+# Kiểm tra nếu có flag --reload trong tham số truyền vào
+for arg in "$@"; do
+  if [ "$arg" = "--reload" ]; then
+    RELOAD_FLAG="--reload"
+    break
+  fi
+done
+
 cd "$(dirname "$0")"
 
 # Activate conda env và setup CUDA paths
@@ -33,4 +43,4 @@ echo "Starting server with CUDA support..."
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 
 # Chạy server
-CUDA_VISIBLE_DEVICES=1 uvicorn main_sensevoice:app --reload --host 0.0.0.0 --port 8918
+CUDA_VISIBLE_DEVICES=1 uvicorn main_sensevoice:app --host 0.0.0.0 --port 8918 $reload_flag

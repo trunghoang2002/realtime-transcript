@@ -68,6 +68,7 @@ if DEVICE == "cuda":
 # -------- SenseVoice model ----------
 from funasr import AutoModel
 from silero_vad import VadOptions, get_speech_timestamps, collect_chunks
+from get_audio import decode_audio
 
 model = AutoModel(
     model=MODEL_NAME,
@@ -241,6 +242,7 @@ async def transcribe_file(
     registered_speakers = []
     global speaker_counts
     speaker_counts = []
+    
     normalized_max_speakers: Optional[int] = None
     if detect_speaker:
         try:
@@ -271,7 +273,7 @@ async def transcribe_file(
                     })
         # Nếu model không trả timestamp, synthesize segments dựa trên tổng thời lượng media
         if not segments and texts:
-            duration = get_media_duration_seconds(file_path)
+            duration = decode_audio(file_path).shape[0] / 16000
             # print(f"Duration: {duration}")
             if duration and duration > 0:
                 total_chars = sum(len(re.sub(r"<\|[^|>]+\|>", "", t).strip()) for t in texts if t and t.strip())
@@ -415,9 +417,26 @@ async def transcribe_uploaded_file(
             processing_time = (datetime.now() - start_time).total_seconds()
             segments_count = len(result.get("segments", []))
             text_length = len(result.get("text", ""))
-            logger.info(f"[API] POST /api/transcribe - Completed: filename={file.filename}, processing_time={processing_time:.2f}s, segments={segments_count}, text_length={text_length}")
+            # Tính RTF
+            audio_duration = decode_audio(tmp_path).shape[0] / 16000
+            rtf = round(processing_time / audio_duration, 3) if audio_duration and audio_duration > 0 else None
             
-            return JSONResponse(content={"success": True, "filename": file.filename, **result})
+            logger.info(
+                "[API] POST /api/transcribe - Completed: filename=%s, processing_time=%.2fs, audio_duration=%.2fs, rtf=%s, segments=%s, text_length=%s",
+                file.filename,
+                processing_time,
+                audio_duration,
+                f"{rtf:.3f}" if isinstance(rtf, float) else "n/a",
+                segments_count,
+                text_length,
+            )
+            
+            return JSONResponse(content={
+                "success": True,
+                "filename": file.filename,
+                "rtf": rtf,
+                **result
+            })
         except Exception as e:
             processing_time = (datetime.now() - start_time).total_seconds()
             logger.error(f"[API] POST /api/transcribe - Error: filename={file.filename}, error={str(e)}, processing_time={processing_time:.2f}s", exc_info=True)
@@ -561,6 +580,12 @@ async def ws_transcribe(ws: WebSocket):
     running = True
     time_offset = 0.0  # Track thời gian tích lũy từ đầu session
     end_speech = False
+
+    # Reset registered_speakers và speaker_counts
+    global registered_speakers
+    registered_speakers = []
+    global speaker_counts
+    speaker_counts = []
 
     async def flush_and_transcribe():
         nonlocal recv_buffer, time_offset, total_segments_sent, end_speech

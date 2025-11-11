@@ -220,6 +220,7 @@ async def transcribe_file(
         registered_speakers = []
         global speaker_counts
         speaker_counts = []
+
         normalized_max_speakers: Optional[int] = None
         if detect_speaker:
             try:
@@ -527,6 +528,7 @@ async def ws_transcribe(ws: WebSocket):
     time_offset = 0.0  # Track thời gian tích lũy từ đầu session
     end_speech = False
 
+    # Reset registered_speakers và speaker_counts
     global registered_speakers
     registered_speakers = []
     global speaker_counts
