@@ -10,8 +10,13 @@
 
 - **Realtime Transcription**: Chuyển đổi giọng nói thành văn bản theo thời gian thực qua WebSocket (stream Full Transcript + Segments có timestamp)
 - **File Upload**: Upload và transcribe file audio/video (mp3, wav, m4a, mp4, avi, mov, ...), trả về full transcript và danh sách segments có timestamp
+- **Speaker Detection (Nhận diện người nói)**: Tùy chọn nhận diện và phân biệt nhiều người nói trong audio, hỗ trợ cấu hình số lượng người nói tối đa (mặc định: 2)
 - **Đa ngôn ngữ**: Hỗ trợ nhiều ngôn ngữ với tự động phát hiện ngôn ngữ
 - **Timestamps**: Realtime có timestamp theo buffer; Upload có timestamp từ model hoặc được suy đoán (fallback) theo độ dài nội dung
+- **RTF (Real-Time Factor)**: Tính toán và hiển thị RTF cho file upload để đánh giá hiệu suất xử lý
+- **Auto-detect WebSocket URL**: Tự động phát hiện và cấu hình WebSocket URL từ port của backend
+- **Error Handling**: Hệ thống thông báo lỗi/thành công với tự động dừng khi có lỗi
+- **UI Protection**: Tự động disable các tùy chọn cấu hình khi đang xử lý để tránh thay đổi không mong muốn
 - **Drag & Drop**: Kéo thả file để upload dễ dàng
 - **Progress Tracking**: Theo dõi tiến trình upload và xử lý
 
@@ -107,14 +112,37 @@ python main.py
 Server sẽ chạy tại: `http://localhost:8917`
 
 ### Chạy với CUDA (nếu có GPU)
+
+**Yêu cầu:**
+- CUDA 12.1 đã được cài đặt
+- File `~/activate_cuda121.sh` để activate CUDA 12.1
+- Conda environment `v2t` đã được tạo và có các dependencies
+
+**Chạy server:**
 ```bash
 cd backend
-./run_main_with_cuda.sh          # Whisper
+./run_main_with_cuda.sh          # Whisper (port 8917)
 # hoặc
-./run_main_sensevoice_with_cuda.sh  # SenseVoice
+./run_main_sensevoice_with_cuda.sh  # SenseVoice (port 8918)
 ```
 
-Các script trên tự cấu hình `LD_LIBRARY_PATH` cho cuDNN.
+**Với auto-reload (development):**
+```bash
+./run_main_with_cuda.sh --reload          # Whisper
+./run_main_sensevoice_with_cuda.sh --reload  # SenseVoice
+```
+
+**Lưu ý:**
+- Scripts tự động:
+  - Activate conda environment `v2t`
+  - Setup CUDA paths và cuDNN libraries từ conda env
+  - Cấu hình `LD_LIBRARY_PATH` cho cuDNN và PyTorch libraries
+  - Sử dụng GPU device 1 (`CUDA_VISIBLE_DEVICES=1`)
+- Whisper chạy trên port **8917**, SenseVoice chạy trên port **8918**
+- Nếu gặp lỗi, kiểm tra:
+  - Conda env `v2t` đã được tạo chưa
+  - File `~/activate_cuda121.sh` có tồn tại không
+  - CUDA 12.1 đã được cài đặt đúng chưa
 
 ### Truy cập ứng dụng
 Mở trình duyệt và truy cập: `http://localhost:8917`
@@ -132,7 +160,9 @@ Kết nối WebSocket để realtime transcription.
   "event": "start",
   "sample_rate": 16000,
   "format": "pcm16",
-  "language": "vi"  // hoặc "auto", "en", "ja", ...
+  "language": "vi",  // hoặc "auto", "en", "ja", ...
+  "detect_speaker": false,  // (optional) Bật/tắt nhận diện người nói
+  "max_speakers": 2  // (optional) Số lượng người nói tối đa (chỉ khi detect_speaker=true)
 }
 ```
 
@@ -141,7 +171,7 @@ Kết nối WebSocket để realtime transcription.
 3. Server trả về:
 ```json
 {"type": "ready"}
-{"type": "partial", "text": "...", "segments": [{"start": 0.0, "end": 1.0, "text": "..."}]}
+{"type": "partial", "text": "...", "speaker_id": "spk_01", "language": "vi", "language_probability": 0.95, "segments": [{"start": 0.0, "end": 1.0, "text": "...", "speaker_id": "spk_01"}]}
 {"type": "final", "text": ""}
 {"type": "error", "message": "..."}  // Nếu có lỗi
 ```
@@ -159,8 +189,10 @@ Upload file audio/video để transcribe.
 - Method: `POST`
 - Content-Type: `multipart/form-data`
 - Form fields:
-  - `file`: File audio/video
+  - `file`: File audio/video (required)
   - `language`: (optional) Ngôn ngữ ("vi", "en", "auto", ...)
+  - `detect_speaker`: (optional) "true" hoặc "false" - Bật/tắt nhận diện người nói (mặc định: "false")
+  - `max_speakers`: (optional) Số lượng người nói tối đa (chỉ khi detect_speaker="true", mặc định: 2)
 
 **Response:**
 ```json
@@ -172,20 +204,30 @@ Upload file audio/video để transcribe.
     {
       "start": 0.0,
       "end": 5.2,
-      "text": "Đoạn text đầu tiên"
+      "text": "Đoạn text đầu tiên",
+      "speaker_id": "spk_01"  // Chỉ có khi detect_speaker=true
     },
     ...
   ],
   "language": "vi",
-  "language_probability": 0.95
+  "language_probability": 0.95,
+  "rtf": 0.234  // Real-Time Factor: processing_time / audio_duration
 }
 ```
 
 **Example với curl:**
 ```bash
+# Upload cơ bản
 curl -X POST http://localhost:8917/api/transcribe \
   -F "file=@audio.mp3" \
   -F "language=vi"
+
+# Upload với speaker detection
+curl -X POST http://localhost:8917/api/transcribe \
+  -F "file=@audio.mp3" \
+  -F "language=vi" \
+  -F "detect_speaker=true" \
+  -F "max_speakers=3"
 ```
 
 ## 📁 Cấu trúc thư mục
@@ -193,33 +235,102 @@ curl -X POST http://localhost:8917/api/transcribe \
 ```
 realtime-transcript/
 ├── backend/
-│   ├── main.py              # FastAPI server
-│   ├── requirements.txt     # Python dependencies
-│   └── __pycache__/         # Python cache
+│   ├── main.py                          # FastAPI server với Whisper model
+│   ├── main_sensevoice.py               # FastAPI server với SenseVoice model
+│   ├── requirements.txt                 # Python dependencies
+│   ├── constraints.txt                  # Version constraints cho dependencies
+│   │
+│   ├── run_main_with_cuda.sh            # Script chạy Whisper với CUDA support
+│   ├── run_main_sensevoice_with_cuda.sh # Script chạy SenseVoice với CUDA support
+│   ├── activate_cuda_env.sh             # Script activate CUDA environment
+│   │
+│   ├── get_audio.py                     # Utilities để decode audio/video files
+│   ├── silero_vad.py                    # VAD (Voice Activity Detection) sử dụng Silero VAD
+│   ├── fix_speechbrain.py               # Patch compatibility cho SpeechBrain với huggingface_hub
+│   │
+│   ├── check_cuda.py                    # Script kiểm tra CUDA availability
+│   │
+│   ├── whisper_docs.md                  # Tài liệu về Whisper model
+│   ├── sensevoice_docs.md               # Tài liệu về SenseVoice model
+│   ├── whisper_vs_sensevoice.md         # So sánh Whisper vs SenseVoice
+│   │
+│   ├── eval/                            # Thư mục evaluation/testing
+│   │   ├── eval.py                      # Script đánh giá model
+│   │   ├── en/                          # Test cases tiếng Anh
+│   │   └── ja/                          # Test cases tiếng Nhật
+│   │
+│   ├── note.txt                         # Ghi chú phát triển
+│   └── __pycache__/                     # Python cache (tự động tạo)
+│
 ├── frontend/
-│   └── index.html           # Frontend UI
-└── README.md                # Tài liệu này
+│   └── index.html                       # Frontend UI (HTML + JavaScript)
+│
+└── README.md                            # Tài liệu này
 ```
+
+### Mô tả các thành phần chính
+
+#### Backend Core Files
+- **`main.py`**: Server chính sử dụng Whisper model (`faster-whisper`) cho realtime và file transcription
+- **`main_sensevoice.py`**: Server thay thế sử dụng SenseVoice model (`funasr`) với khả năng fallback timestamp tốt hơn
+
+#### Utility Modules
+- **`get_audio.py`**: Xử lý decode audio/video files thành numpy array (16kHz mono) sử dụng `av` (PyAV)
+- **`silero_vad.py`**: Voice Activity Detection để phát hiện các đoạn có giọng nói, loại bỏ im lặng
+- **`fix_speechbrain.py`**: Patch để fix compatibility issue giữa SpeechBrain và huggingface_hub (cần cho speaker detection)
+
+#### CUDA Scripts
+- **`run_main_with_cuda.sh`**: Script tự động setup CUDA/cuDNN và chạy Whisper server trên port 8917
+- **`run_main_sensevoice_with_cuda.sh`**: Script tự động setup CUDA/cuDNN và chạy SenseVoice server trên port 8918
+- **`activate_cuda_env.sh`**: Script helper để activate CUDA environment
+- **`check_cuda.py`**: Script kiểm tra CUDA có sẵn và hoạt động không
+
+#### Documentation
+- **`whisper_docs.md`**: Tài liệu chi tiết về cách sử dụng Whisper model
+- **`sensevoice_docs.md`**: Tài liệu chi tiết về cách sử dụng SenseVoice model
+- **`whisper_vs_sensevoice.md`**: So sánh ưu/nhược điểm giữa 2 models
+
+#### Evaluation
+- **`eval/`**: Thư mục chứa scripts và test cases để đánh giá chất lượng transcription
+  - `eval.py`: Script chạy evaluation
+  - `en/`, `ja/`: Test cases cho các ngôn ngữ khác nhau
 
 ## 🎯 Cách sử dụng
 
 ### Realtime Transcription
 
 1. Mở tab **"Realtime"**
-2. Chọn ngôn ngữ (hoặc "Tự động")
+2. Cấu hình:
+   - **WebSocket URL**: Tự động detect từ backend (có thể chỉnh sửa nếu cần)
+   - **Ngôn ngữ**: Chọn ngôn ngữ (hoặc "Tự động")
+   - **Detect speaker**: Bật/tắt nhận diện người nói (tùy chọn)
+   - **Max speaker**: Số lượng người nói tối đa (chỉ hiện khi bật Detect speaker, mặc định: 2)
 3. Nhấn **"Start"** và cho phép truy cập microphone
+   - Các tùy chọn cấu hình sẽ tự động bị disable khi đang xử lý
 4. Bắt đầu nói, transcript sẽ hiển thị theo thời gian thực theo 2 phần:
-   - Full Transcript: nối liên tục nội dung
-   - Segments: danh sách các đoạn có timestamp (start → end)
+   - **Full Transcript**: Nối liên tục nội dung (có speaker ID nếu bật detect speaker)
+   - **Segments**: Danh sách các đoạn có timestamp (start → end) và speaker ID (nếu có)
 5. Nhấn **"Stop"** để dừng
+   - Các tùy chọn cấu hình sẽ được enable lại
+
+**Lưu ý**: Nếu có lỗi xảy ra, hệ thống sẽ tự động dừng và hiển thị thông báo lỗi.
 
 ### Upload File
 
 1. Mở tab **"Upload File"**
-2. Chọn ngôn ngữ (hoặc "Tự động")
+2. Cấu hình:
+   - **Ngôn ngữ**: Chọn ngôn ngữ (hoặc "Tự động")
+   - **Detect speaker**: Bật/tắt nhận diện người nói (tùy chọn)
+   - **Max speaker**: Số lượng người nói tối đa (chỉ hiện khi bật Detect speaker, mặc định: 2)
 3. Kéo thả file vào vùng upload hoặc click **"Chọn File"**
-4. Chờ xử lý (progress bar sẽ hiển thị)
-5. Xem kết quả transcript với timestamps (segments)
+   - Các tùy chọn cấu hình sẽ tự động bị disable khi đang xử lý
+4. Chờ xử lý:
+   - Progress bar sẽ hiển thị tiến trình upload
+   - Thông báo thành công/lỗi sẽ xuất hiện ở góc trên bên phải
+5. Xem kết quả:
+   - **Full Transcript**: Toàn bộ nội dung (có speaker ID nếu bật detect speaker)
+   - **Segments**: Danh sách các đoạn có timestamp và speaker ID (nếu có)
+   - **RTF**: Real-Time Factor (hiệu suất xử lý) - RTF < 1.0 nghĩa là xử lý nhanh hơn thời gian thực
 
 ## ⚙️ Cấu hình nâng cao
 
@@ -232,10 +343,12 @@ uvicorn.run("main:app", host="0.0.0.0", port=8917, reload=True)
 
 ### Thay đổi WebSocket URL
 
-Sửa trong `frontend/index.html`:
+WebSocket URL tự động detect từ port của backend. Nếu cần chỉnh sửa thủ công, sửa trong `frontend/index.html`:
 ```html
 <input id="wsUrl" type="text" value="ws://localhost:8917/ws">
 ```
+
+Hoặc chỉnh sửa function `getWebSocketUrl()` trong JavaScript để thay đổi logic auto-detect.
 
 ### Tối ưu hóa cho realtime
 
@@ -286,10 +399,21 @@ Trong `transcribe_file()`:
 
 ## 📝 Ghi chú
 
-- Model Whisper được tải tự động lần đầu chạy
+- Model Whisper/SenseVoice được tải tự động lần đầu chạy
 - File tạm sẽ tự động xóa sau khi xử lý xong
 - Realtime transcription sử dụng buffer ~1 giây để giảm độ trễ
 - Với video files, audio sẽ được extract tự động nếu có ffmpeg
+- **Speaker Detection**: Sử dụng SpeechBrain ECAPA-TDNN model để nhận diện người nói
+  - Speaker ID được gán dạng `spk_01`, `spk_02`, ...
+  - Hệ thống tự động học và cập nhật embedding của từng speaker
+  - Khi vượt quá `max_speakers`, hệ thống sẽ gán audio mới cho speaker gần nhất
+- **RTF (Real-Time Factor)**: 
+  - RTF = processing_time / audio_duration
+  - RTF < 1.0: Xử lý nhanh hơn thời gian thực (tốt)
+  - RTF = 1.0: Xử lý bằng thời gian thực
+  - RTF > 1.0: Xử lý chậm hơn thời gian thực
+- Các tùy chọn cấu hình tự động bị disable khi đang xử lý để tránh thay đổi không mong muốn
+- Hệ thống tự động hiển thị/ẩn các phần tử UI dựa trên trạng thái (chỉ hiện transcript khi đang ghi)
 
 ## 🔧 Dependencies
 
