@@ -246,6 +246,81 @@
     let audioCtx, micStream, sourceNode, processorNode;
     let ws;
     let running = false;
+    let awaitingFinal = false;
+    let stopFinalized = false;
+    let finalTimeoutId = null;
+
+    function clearFinalTimeout() {
+      if (finalTimeoutId) {
+        clearTimeout(finalTimeoutId);
+        finalTimeoutId = null;
+      }
+    }
+
+    async function releaseAudioResources() {
+      try {
+        if (processorNode) {
+          processorNode.disconnect();
+        }
+      } catch (e) {}
+      processorNode = null;
+
+      try {
+        if (sourceNode) {
+          sourceNode.disconnect();
+        }
+      } catch (e) {}
+      sourceNode = null;
+
+      if (audioCtx) {
+        try {
+          if (audioCtx.state !== "closed") {
+            await audioCtx.close();
+          }
+        } catch (e) {}
+      }
+      audioCtx = null;
+
+      if (micStream) {
+        try {
+          micStream.getTracks().forEach(t => t.stop());
+        } catch (e) {}
+      }
+      micStream = null;
+    }
+
+    function resetStopState() {
+      clearFinalTimeout();
+      awaitingFinal = false;
+      stopFinalized = false;
+    }
+
+    function finalizeStop({ statusMessage, statusGood = false, silent = false } = {}) {
+      if (stopFinalized) return;
+
+      stopFinalized = true;
+      awaitingFinal = false;
+      clearFinalTimeout();
+
+      releaseAudioResources().catch(() => {});
+
+      const socket = ws;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        try {
+          socket.close();
+        } catch (e) {}
+      }
+      ws = null;
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      running = false;
+      setRealtimeConfigDisabled(false);
+
+      if (!silent && statusMessage) {
+        updateStatus(statusMessage, statusGood);
+      }
+    }
 
     const startBtn = document.getElementById("startBtn");
     const stopBtn  = document.getElementById("stopBtn");
@@ -271,6 +346,8 @@
 
     let inputSampleRate = 48000;
     let leftover = new Float32Array(0);
+    let currentPartialText = "";
+    let partialStartIndex = 0;
 
     function updateStatus(t, good=true) {
       statusEl.textContent = t;
@@ -350,10 +427,13 @@
 
     async function start() {
       if (running) return;
+      resetStopState();
       fullTranscriptEl.textContent = "";  // Clear full transcript
       segmentsListEl.innerHTML = "";     // Clear segments list
       realtimeLanguageEl.textContent = ""; // Clear realtime language
       leftover = new Float32Array(0);
+      currentPartialText = "";
+      partialStartIndex = 0;
 
       // Disable realtime configs while running
       setRealtimeConfigDisabled(true);
@@ -390,7 +470,7 @@
         ws.send(JSON.stringify(startPayload));
       };
 
-      ws.onmessage = (evt) => {
+      ws.onmessage = async (evt) => {
         try {
           const data = JSON.parse(evt.data);
           if (data.type === "ready") {
@@ -446,7 +526,7 @@
               });
             }
           } else if (data.type === "full") {
-            fullTranscriptEl.textContent = data.text.replace("/newline", "\n");
+            fullTranscriptEl.textContent = data.text.replaceAll("/newline", "\n");
             realtimeLanguageEl.textContent = " " + data.language + " (" + (data.language_probability * 100).toFixed(1) + "%)";
             fullTranscriptEl.scrollTop = fullTranscriptEl.scrollHeight;
 
@@ -480,10 +560,11 @@
             }
           } else if (data.type === "final") {
             updateStatus("Kết thúc phiên", true);
+            finalizeStop({ silent: true });
           } else if (data.type === "error") {
             updateStatus("Lỗi: " + data.message, false);
             showNotification(data.message || "Có lỗi xảy ra trong quá trình xử lý.", "error");
-            stop({ silent: true });
+            await stop({ silent: true, force: true });
           }
         } catch (e) {
           // ignore non-JSON (nếu có)
@@ -491,9 +572,12 @@
       };
 
       ws.onclose = () => {
-        updateStatus("Đã ngắt kết nối", false);
-        // Re-enable realtime configs when disconnected
-        setRealtimeConfigDisabled(false);
+        if (!stopFinalized) {
+          finalizeStop({
+            statusMessage: awaitingFinal ? "Đã dừng (server đóng kết nối)" : "Đã ngắt kết nối",
+            statusGood: false,
+          });
+        }
       };
 
       // Lấy micro
@@ -518,44 +602,66 @@
 
     async function stop(arg) {
       const isEvent = arg && typeof arg.preventDefault === "function";
-      if (isEvent) {
+      if (isEvent && arg.type !== "beforeunload") {
         arg.preventDefault();
       }
       const options = isEvent ? {} : (arg || {});
-      const { silent = false } = options;
+      const { silent = false, force = false } = options;
+      const shouldAwaitFinal = !force;
 
-      if (!running) return;
-
-      // gửi stop tới server
-      try {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ event: "stop" }));
+      if (!running) {
+        if (shouldAwaitFinal) {
+          if (awaitingFinal && !silent) {
+            updateStatus("Đang chờ server kết thúc...", true);
+          }
+          return;
         }
-      } catch (e) {}
-
-      // ngắt audio graph
-      try {
-        if (processorNode) processorNode.disconnect();
-        if (sourceNode) sourceNode.disconnect();
-        if (audioCtx && audioCtx.state !== "closed") await audioCtx.close();
-      } catch (e) {}
-
-      // tắt mic
-      if (micStream) {
-        micStream.getTracks().forEach(t => t.stop());
       }
 
-      // đóng ws
-      try { ws && ws.close(); } catch (e) {}
+      if (awaitingFinal && shouldAwaitFinal) {
+        if (!silent) {
+          updateStatus("Đang chờ server kết thúc...", true);
+        }
+        return;
+      }
 
-      startBtn.disabled = false;
+      startBtn.disabled = true;
       stopBtn.disabled = true;
-      running = false;
-      if (!silent) {
-        updateStatus("Đã dừng", false);
+
+      if (shouldAwaitFinal) {
+        awaitingFinal = true;
+        stopFinalized = false;
+        if (!silent) {
+          updateStatus("Đang dừng, chờ server...", true);
+        }
       }
-      // Re-enable realtime configs after stopping
-      setRealtimeConfigDisabled(false);
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ event: "stop" }));
+        } catch (e) {}
+      }
+
+      await releaseAudioResources();
+
+      running = false;
+
+      if (shouldAwaitFinal) {
+        clearFinalTimeout();
+        finalTimeoutId = setTimeout(() => {
+          finalizeStop({
+            statusMessage: "Đã dừng (hết thời gian chờ server)",
+            statusGood: false,
+          });
+        }, 5000);
+        return;
+      }
+
+      finalizeStop({
+        statusMessage: silent ? undefined : "Đã dừng",
+        statusGood: false,
+        silent,
+      });
     }
 
     startBtn.addEventListener("click", start);
