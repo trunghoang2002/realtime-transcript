@@ -1,5 +1,6 @@
 #!/bin/bash
 # Script để chạy server với CUDA/cuDNN đã được setup
+clear && echo "Clearing screen..."
 
 RELOAD_FLAG=""
 
