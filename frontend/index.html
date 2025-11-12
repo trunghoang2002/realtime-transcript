@@ -445,6 +445,39 @@
                 segmentsListEl.scrollTop = segmentsListEl.scrollHeight;
               });
             }
+          } else if (data.type === "full") {
+            fullTranscriptEl.textContent = data.text.replace("/newline", "\n");
+            realtimeLanguageEl.textContent = " " + data.language + " (" + (data.language_probability * 100).toFixed(1) + "%)";
+            fullTranscriptEl.scrollTop = fullTranscriptEl.scrollHeight;
+
+            // Stream vào Segments
+            if (data.segments && data.segments.length > 0) {
+              data.segments.forEach(seg => {
+                const timeStr = `${formatTime(seg.start)} → ${formatTime(seg.end)}`;
+                const segmentDiv = document.createElement("div");
+                segmentDiv.className = "segment-item";
+                segmentDiv.style.margin = "8px 0";
+                const timeSpan = document.createElement("span");
+                timeSpan.className = "segment-time";
+                timeSpan.textContent = timeStr;
+                const textSpan = document.createElement("span");
+                if (seg.speaker_id) {
+                  const speakerSpan = document.createElement("span");
+                  speakerSpan.className = "segment-speaker";
+                  speakerSpan.textContent = `${seg.speaker_id}:`;
+                  textSpan.appendChild(speakerSpan);
+                  const textContent = seg.text || "";
+                  textSpan.appendChild(document.createTextNode(textContent ? ` ${textContent}` : ""));
+                } else {
+                  textSpan.textContent = seg.text || "";
+                }
+                segmentDiv.appendChild(timeSpan);
+                segmentDiv.appendChild(textSpan);
+                segmentsListEl.appendChild(segmentDiv);
+                // Auto scroll
+                segmentsListEl.scrollTop = segmentsListEl.scrollHeight;
+              });
+            }
           } else if (data.type === "final") {
             updateStatus("Kết thúc phiên", true);
           } else if (data.type === "error") {

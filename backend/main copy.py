@@ -6,10 +6,6 @@ import tempfile
 import uuid
 from typing import Optional
 from datetime import datetime
-import unicodedata
-import re
-from typing import List, Dict, Optional, Tuple
-import string
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
@@ -456,15 +452,15 @@ async def run_transcribe_on_buffer(
 
     try:
         # VAD filter
-        # Kiểm tra nếu audio có khoảng im lặng > 800ms trong 1s thì trả về "silence"
-        vad_options = VadOptions(min_silence_duration_ms=800)
+        # Kiểm tra nếu audio có khoảng im lặng > 750ms trong 1s thì trả về "silence"
+        vad_options = VadOptions(min_silence_duration_ms=750)
         speech_chunks = get_speech_timestamps(audio_f32, vad_options)
         if len(speech_chunks) == 0:
             return {"text": "silence", "segments": []}
         # for idx, chunk in enumerate(speech_chunks):
         #     print(f"chunk {idx}: start={chunk['start']} - {chunk['start'] / 16000}s, end={chunk['end']} - {chunk['end'] / 16000}s")
         
-        audio_f32 = collect_chunks(audio_f32, speech_chunks)
+        # audio_f32 = collect_chunks(audio_f32, speech_chunks)
 
         speaker_id = None
         if detect_speaker:
@@ -541,254 +537,6 @@ async def run_transcribe_on_buffer(
         print(f"Transcription error: {e}")
         raise
 
-def normalize_word(w):
-    return re.sub(r"[^\w']", '', w).lower()
-
-def create_mapping_with_punct(t1, timestamps):
-    mapping = []
-    word_map = {}
-    punct_map = {}
-
-    # Tách dấu câu trong timestamp word (vd "Mark," -> "Mark", ",")
-    for t in timestamps:
-        text = t['word'].strip()
-        # Nếu có dấu câu ở cuối, tách ra
-        if len(text) > 1 and text[-1] in string.punctuation:
-            main = text[:-1]
-            punct = text[-1]
-            norm_main = normalize_word(main)
-            if norm_main:
-                word_map.setdefault(norm_main, []).append(t)
-            punct_map[punct] = {'start': t['start'], 'end': t['end']}
-        else:
-            norm = normalize_word(text)
-            if norm:
-                word_map.setdefault(norm, []).append(t)
-
-    last_valid = None
-
-    for token in t1:
-        token_strip = token.strip()
-        token_norm = normalize_word(token_strip)
-
-        if not token_strip:
-            if last_valid:
-                mapping.append({'token': token_strip,
-                                'last_token': last_valid['word'],
-                                'start': last_valid['start'],
-                                'end': last_valid['end']})
-            else:
-                mapping.append(None)
-            continue
-
-        # Trường hợp token là dấu câu độc lập (, ? . !)
-        if token_strip in string.punctuation:
-            if token_strip in punct_map:
-                # Nếu dấu câu có timestamp riêng từ tách
-                mapping.append({'token': token_strip,
-                                'start': punct_map[token_strip]['start'],
-                                'end': punct_map[token_strip]['end']})
-            elif last_valid:
-                # Nếu không có thì gắn timestamp của từ trước đó
-                mapping.append({'token': token_strip,
-                                'start': last_valid['start'],
-                                'end': last_valid['end']})
-            else:
-                mapping.append(None)
-            continue
-
-        # Tìm timestamp ứng với token
-        candidates = word_map.get(token_norm, [])
-        if candidates:
-            best = max(candidates, key=lambda x: x['end'])
-            last_valid = best
-            mapping.append({'token': token_strip,
-                            'start': best['start'],
-                            'end': best['end']})
-        else:
-            mapping.append(None)
-
-    return mapping
-
-def normalize(t: str):
-    return re.sub(r"[^\w\s]", "", t).lower().strip()
-
-def _tokenize_keep_spaces(s: str) -> List[str]:
-    # giữ cả khoảng trắng, chữ, và dấu câu
-    return re.findall(r"\s+|\w+|[^\w\s]", s)
-
-def _words_normalized(tokens: List[str]) -> List[str]:
-    # chỉ lấy token có chữ (word), normalize
-    return [normalize(w) for w in tokens if re.search(r"\w", w)]
-
-def _map_word_index_to_ts(ts: List[Dict]) -> Tuple[List[int], List[float], List[float]]:
-    """
-    Trả về:
-      - idx_in_ts: map chỉ số 'word-thứ-k' (tính trên token có chữ) -> index trong ts
-      - starts, ends: thời gian start/end cho mỗi 'word-thứ-k'
-    Lưu ý: ts có thể chứa token gồm cả dấu câu hoặc khoảng trắng gắn kèm (' mountains.' / " It's")
-    -> ta normalize và chỉ nhận những cái có \\w.
-    """
-    idx_in_ts, starts, ends = [], [], []
-    for i, item in enumerate(ts):
-        w = item.get("word", "")
-        if re.search(r"\w", normalize(w)):
-            idx_in_ts.append(i)
-            starts.append(float(item["start"]))
-            ends.append(float(item["end"]))
-    return idx_in_ts, starts, ends
-
-def _intervals_touch_or_overlap(a: Tuple[float,float], b: Tuple[float,float], tol: float=0.05) -> bool:
-    a0, a1 = a
-    b0, b1 = b
-    # overlap
-    if max(a0, b0) <= min(a1, b1):
-        return True
-    # gần nhau trong tol
-    if abs(b0 - a1) <= tol or abs(a0 - b1) <= tol:
-        return True
-    return False
-
-def merge_with_internal_overlap(
-    s1: str,
-    s2: str,
-    s1_timestamp: Optional[List[Dict]] = None,
-    s2_timestamp: Optional[List[Dict]] = None,
-    tol: float = 0.05,
-):
-    t1 = _tokenize_keep_spaces(s1)
-    t2 = _tokenize_keep_spaces(s2)
-    n1 = _words_normalized(t1)
-    n2 = _words_normalized(t2)
-    # print("t1", t1)
-    # print("t2", t2)
-    # print("n1", n1)
-    # print("n2", n2)
-
-    # tìm overlap theo chữ (giống bản trước)
-    best_k = 0
-    best_end = 0
-    max_k = min(len(n1), len(n2))
-    for k in range(max_k, 0, -1): # Duyệt độ dài overlap k từ lớn → nhỏ.
-        for p in range(0, len(n1) - k + 1):
-            if n1[p:p+k] == n2[:k]:
-                if p + k > best_end:
-                    best_k = k
-                    best_end = p + k
-        if best_k == k and best_k > 0:
-            break
-
-    # ánh xạ từ số-word -> index thật trong danh sách token có cả khoảng trắng/dấu câu
-    def find_real_index(tokens, count_words):
-        idx = 0
-        seen = 0
-        while idx < len(tokens) and seen < count_words:
-            if re.search(r"\w", tokens[idx]):
-                seen += 1
-            idx += 1
-        return idx
-
-    # --- Bộ lọc timestamp ---
-    def pass_ts_gate(start_idx: int, end_idx: int, k: int) -> bool:
-        if k <= 0:
-            return False
-        # Nếu có cả s1_ts và s2_ts: dùng đúng quy tắc người dùng yêu cầu
-        if s1_timestamp and s2_timestamp:
-            t1_mapping = create_mapping_with_punct(t1, s1_timestamp)
-            t2_mapping = create_mapping_with_punct(t2, s2_timestamp)
-            # print("t1_mapping", t1_mapping)
-            # print("t2_mapping", t2_mapping)
-            if end_idx >= len(t1) or start_idx >= len(t2):
-                return False
-            if not t1_mapping[end_idx] or not t2_mapping[start_idx]:
-                return False
-            a = (t1_mapping[end_idx]['start'], t1_mapping[end_idx]['end'])  # từ đầu tiên bị thay thế trong s1
-            b = (t2_mapping[start_idx]['start'], t2_mapping[start_idx]['end'])  # từ đầu tiên dùng để thay thế trong s2
-            # print(t1_mapping[end_idx])
-            # print(t2_mapping[start_idx])
-            return _intervals_touch_or_overlap(a, b, tol)
-        # Nếu chỉ có s1_ts: overlap chỉ hợp lệ nếu nó xảy ra ngay sát "điểm kết" của s1
-        if s1_timestamp and not s2_timestamp:
-            _, s1_starts, s1_ends = _map_word_index_to_ts(s1_timestamp)
-            if not s1_starts:
-                return False
-            # từ đầu tiên của overlap trong s1
-            if p >= len(s1_starts):
-                return False
-            a = (s1_starts[p], s1_ends[p])
-            # "điểm kết" xem như từ chữ cuối cùng của s1
-            last = (s1_starts[-1], s1_ends[-1])
-            # chấp nhận nếu từ-overlap đầu tiên gần điểm kết (≤ tol) hoặc trùng giao
-            # if end_idx-2 >= 0 and start_idx-2 >= 0 and t1[end_idx-1] == t2[start_idx-1] and t1[end_idx-2] == t2[start_idx-2]:
-            #     return True
-            return _intervals_touch_or_overlap(a, last, tol)
-        # Không có timestamp → giữ nguyên hành vi cũ
-        return True
-    # print("best_k", best_k)
-    # print("best_end", best_end)
-    end_idx = find_real_index(t1, best_end)
-    start_idx = find_real_index(t2, best_k)
-    # print("end_idx", end_idx)
-    # print(t1[:end_idx])
-    # print("start_idx", start_idx)
-    # print(t2[start_idx:])
-    if best_k > 0 and not pass_ts_gate(start_idx, end_idx, best_k):
-        # Timestamp gate FAIL → coi như không overlap
-        best_k = 0
-        best_end = 0
-
-    if best_k > 0:
-        end_idx = find_real_index(t1, best_end)
-        start_idx = find_real_index(t2, best_k)
-        return "".join(t1[:end_idx]) + "".join(t2[start_idx:])
-    else:
-        # Không overlap → nối, chèn khoảng trắng nếu cần
-        s1_strip = s1.rstrip()
-        s2_strip = s2.lstrip()
-        if not s1_strip.endswith((" ", "\n")) and not s2_strip.startswith((".", ",", "!", "?", " ")):
-            return s1_strip + " " + s2_strip
-        return s1_strip + s2_strip
-
-def normalize_jp(text: str):
-    # Chuẩn hoá Unicode, bỏ punctuation tiếng Nhật + tiếng Anh
-    text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"[。、．，・「」『』（）()［］［］？?！!…‥ー\-]", "", text)
-    return text.strip()
-
-def get_follow_text_jp(s1: str, s2: str) -> str:
-    # normalize
-    n1 = normalize_jp(s1)
-    n2 = normalize_jp(s2)
-
-    max_len = min(len(n1), len(n2))
-    overlap_len = 0
-
-    # tìm overlap chuỗi dài nhất
-    for k in range(max_len, 0, -1):
-        if n1[-k:] == n2[:k]:
-            overlap_len = k
-            break
-
-    # không tìm thấy overlap → trả về toàn bộ s2
-    if overlap_len == 0:
-        return s2.strip()
-
-    # cắt s2 phần overlap (dựa vào normalized mapping)
-    # TÌM ĐÚNG VỊ TRÍ CHUỖI gốc trong s2 (để không mất kanji)
-    normalized_overlap = n2[:overlap_len]
-
-    # tìm vị trí xuất hiện overlap trong s2 đã normalize
-    # revert từng ký tự của s2 để tránh mismatch do punctuation
-    s2_norm = normalize_jp(s2)
-
-    idx = s2_norm.find(normalized_overlap)
-    if idx == -1:
-        return s2.strip()  # fallback an toàn
-
-    # phần tiếp theo
-    rest = s2_norm[idx + overlap_len:]
-    return rest.strip()
-
 # ---- WebSocket endpoint ----
 @app.websocket("/ws")
 async def ws_transcribe(ws: WebSocket):
@@ -835,121 +583,118 @@ async def ws_transcribe(ws: WebSocket):
     COMMIT_DELAY = 0.1         # 100ms
     EPS = 1e-3
 
-    full_transcript = ""
-    full_timestamps = []
+    def _overlap(s, e, t0, t1):
+        # true nếu [s, e] giao [t0, t1)
+        if s is None or e is None:
+            return False
+        return not (e <= t0 or s >= t1)
 
-    # def _overlap(s, e, t0, t1):
-    #     # true nếu [s, e] giao [t0, t1)
-    #     if s is None or e is None:
-    #         return False
-    #     return not (e <= t0 or s >= t1)
+    def _smart_join(words, lang_code):
+        # Ghép từ thành câu: 
+        # - tiếng Anh/Âu: join bằng space rồi chỉnh dấu câu
+        # - CJK (ja/zh/ko): join không space (đơn giản)
+        text = ""
+        if lang_code and str(lang_code).lower().startswith(("ja", "zh", "ko")):
+            text = "".join(w["word"] for w in words)
+            text = re.sub(r"\s+", "", text)
+            # Loại khoảng trắng thừa trước dấu câu tiếng Nhật/Trung nếu có
+            return text.strip()
+        else:
+            raw = " ".join(w["word"] for w in words)
+            # Fix space trước dấu câu phổ biến
+            import re
+            raw = re.sub(r"\s+([,.;:!?])", r"\1", raw)
+            raw = re.sub(r"\(\s+", "(", raw)
+            raw = re.sub(r"\s+\)", ")", raw)
+            raw = re.sub(r"\s+", " ", raw)
+            return raw.strip()
 
-    # def _smart_join(words, lang_code):
-    #     # Ghép từ thành câu: 
-    #     # - tiếng Anh/Âu: join bằng space rồi chỉnh dấu câu
-    #     # - CJK (ja/zh/ko): join không space (đơn giản)
-    #     text = ""
-    #     if lang_code and str(lang_code).lower().startswith(("ja", "zh", "ko")):
-    #         text = "".join(w["word"] for w in words)
-    #         text = re.sub(r"\s+", "", text)
-    #         # Loại khoảng trắng thừa trước dấu câu tiếng Nhật/Trung nếu có
-    #         return text.strip()
-    #     else:
-    #         raw = " ".join(w["word"] for w in words)
-    #         # Fix space trước dấu câu phổ biến
-    #         import re
-    #         raw = re.sub(r"\s+([,.;:!?])", r"\1", raw)
-    #         raw = re.sub(r"\(\s+", "(", raw)
-    #         raw = re.sub(r"\s+\)", ")", raw)
-    #         raw = re.sub(r"\s+", " ", raw)
-    #         return raw.strip()
+    def char_overlap_ratio(a: str, b: str) -> float:
+        a = a.strip().lower()
+        b = b.strip().lower()
+        if not a or not b:
+            return 0.0
 
-    # def char_overlap_ratio(a: str, b: str) -> float:
-    #     a = a.strip().lower()
-    #     b = b.strip().lower()
-    #     if not a or not b:
-    #         return 0.0
+        overlap_a_in_b = sum(1 for c in a if c in b)
+        overlap_a_in_b_ratio = overlap_a_in_b / len(a)  # % ký tự của A xuất hiện trong B
 
-    #     overlap_a_in_b = sum(1 for c in a if c in b)
-    #     overlap_a_in_b_ratio = overlap_a_in_b / len(a)  # % ký tự của A xuất hiện trong B
+        overlap_b_in_a = sum(1 for c in b if c in a)
+        overlap_b_in_a_ratio = overlap_b_in_a / len(b)  # % ký tự của B xuất hiện trong A
 
-    #     overlap_b_in_a = sum(1 for c in b if c in a)
-    #     overlap_b_in_a_ratio = overlap_b_in_a / len(b)  # % ký tự của B xuất hiện trong A
+        return max(overlap_a_in_b_ratio, overlap_b_in_a_ratio)
 
-    #     return max(overlap_a_in_b_ratio, overlap_b_in_a_ratio)
+    def _dedupe_boundary(words, emitted_until, last_emitted_word, last_emitted_end, MIN_GAP=0.1, EPS=1e-3):
+        """Loại bỏ từ đã phát (theo thời gian) + trùng mép (theo nội dung)."""
+        out = []
+        for w in words:
+            s, e, t = w["start"], w["end"], w["word"]
+            if e is None or s is None:
+                continue
+            # 1) Bỏ từ có end <= emitted_until (+EPS)
+            if e <= emitted_until + EPS:
+                continue
+            # 2) Nếu quá gần từ cuối đã emit → bỏ (trùng ~ chắc chắn)
+            if last_emitted_word is not None:
+                if (s - last_emitted_end) < MIN_GAP and char_overlap_ratio(t, last_emitted_word) > 0.8:
+                    continue
+            out.append(w)
+        return out
 
-    # def _dedupe_boundary(words, emitted_until, last_emitted_word, last_emitted_end, MIN_GAP=0.1, EPS=1e-3):
-    #     """Loại bỏ từ đã phát (theo thời gian) + trùng mép (theo nội dung)."""
-    #     out = []
-    #     for w in words:
-    #         s, e, t = w["start"], w["end"], w["word"]
-    #         if e is None or s is None:
-    #             continue
-    #         # 1) Bỏ từ có end <= emitted_until (+EPS)
-    #         if e <= emitted_until + EPS:
-    #             continue
-    #         # 2) Nếu quá gần từ cuối đã emit → bỏ (trùng ~ chắc chắn)
-    #         if last_emitted_word is not None:
-    #             if (s - last_emitted_end) < MIN_GAP and char_overlap_ratio(t, last_emitted_word) > 0.8:
-    #                 continue
-    #         out.append(w)
-    #     return out
+    def _dedupe_commit_now(words, overlap_eps=0.01):
+        """
+        Loại bỏ trùng lặp ở commit_now:
+        - Giữ lại từ có prob cao hơn khi start/end overlap.
+        - Loại bỏ ký tự nhiễu như '-' nếu bị overlap và prob thấp.
+        """
 
-    # def _dedupe_commit_now(words, overlap_eps=0.01):
-    #     """
-    #     Loại bỏ trùng lặp ở commit_now:
-    #     - Giữ lại từ có prob cao hơn khi start/end overlap.
-    #     - Loại bỏ ký tự nhiễu như '-' nếu bị overlap và prob thấp.
-    #     """
+        if not words:
+            return []
 
-    #     if not words:
-    #         return []
+        # Sort theo start time
+        words = sorted(words, key=lambda w: (w["start"] or 0.0, w["end"] or 0.0))
 
-    #     # Sort theo start time
-    #     words = sorted(words, key=lambda w: (w["start"] or 0.0, w["end"] or 0.0))
+        out = []
 
-    #     out = []
+        for w in words:
+            if not out:
+                if w and w not in ["-", ".", "...", "—", "_"]:
+                    out.append(w)
+                    continue
 
-    #     for w in words:
-    #         if not out:
-    #             if w and w not in ["-", ".", "...", "—", "_"]:
-    #                 out.append(w)
-    #                 continue
+            last = out[-1]
 
-    #         last = out[-1]
+            s, e = w["start"], w["end"]
+            ls, le = last["start"], last["end"]
 
-    #         s, e = w["start"], w["end"]
-    #         ls, le = last["start"], last["end"]
+            # ---- (1) Kiểm tra overlap thời gian ----
+            overlap = not (e <= ls + overlap_eps or s >= le - overlap_eps)
 
-    #         # ---- (1) Kiểm tra overlap thời gian ----
-    #         overlap = not (e <= ls + overlap_eps or s >= le - overlap_eps)
+            # ---- (2) Normalize từ để so sánh chữ ----
+            w_norm = w["word"].strip().lower()
+            last_norm = last["word"].strip().lower()
 
-    #         # ---- (2) Normalize từ để so sánh chữ ----
-    #         w_norm = w["word"].strip().lower()
-    #         last_norm = last["word"].strip().lower()
+            # ----- Case A: cùng chữ và overlap → giữ từ prob cao -----
+            if w_norm == last_norm and overlap:
+                if w.get("prob", 0) > last.get("prob", 0):
+                    out[-1] = w  # replace
+                continue
 
-    #         # ----- Case A: cùng chữ và overlap → giữ từ prob cao -----
-    #         if w_norm == last_norm and overlap:
-    #             if w.get("prob", 0) > last.get("prob", 0):
-    #                 out[-1] = w  # replace
-    #             continue
+            # ----- Case B: từ nhiễu ('-', '.', ...) → bỏ nếu overlap -----
+            if w_norm in ["-", ".", "...", "—", "_"] and overlap:
+                continue
 
-    #         # ----- Case B: từ nhiễu ('-', '.', ...) → bỏ nếu overlap -----
-    #         if w_norm in ["-", ".", "...", "—", "_"] and overlap:
-    #             continue
+            # ----- Case C: các chữ khác nhau nhưng overlapped mạnh -----
+            # Giữ từ có prob cao hơn
+            if overlap and w.get("prob", 0) < last.get("prob", 0):
+                continue
 
-    #         # ----- Case C: các chữ khác nhau nhưng overlapped mạnh -----
-    #         # Giữ từ có prob cao hơn
-    #         if overlap and w.get("prob", 0) < last.get("prob", 0):
-    #             continue
+            out.append(w)
 
-    #         out.append(w)
-
-    #     return out
+        return out
 
     async def flush_and_transcribe():
         """Chạy ASR trên buffer hiện tại và gửi partial về client."""
-        nonlocal full_buffer, recv_buffer, time_offset, total_segments_sent, end_speech, emitted_until, carry_over_words, last_emitted_word, last_emitted_end, full_transcript, full_timestamps
+        nonlocal full_buffer, recv_buffer, time_offset, total_segments_sent, end_speech, emitted_until, carry_over_words, last_emitted_word, last_emitted_end
         if len(recv_buffer) == 0:
             return
         try:
@@ -965,12 +710,10 @@ async def ws_transcribe(ws: WebSocket):
             # Nếu full_buffer > 2s thì chỉ giữ lại cuối cùng 2 giây
             if len(full_buffer) > MAX_WINDOW_BYTES:
                 full_buffer = full_buffer[-MAX_WINDOW_BYTES:]
-                
             # Nếu chưa đủ 2 giây, thì chưa transcribe (đợi thêm)
-            # if len(full_buffer) < MAX_WINDOW_BYTES:
-            #     time_offset += buffer_duration
-            #     return
-
+            if len(full_buffer) < MAX_WINDOW_BYTES:
+                time_offset += buffer_duration
+                return
             # ---- Sliding Window ----
             window_bytes = bytes(full_buffer)  # đúng 2 giây audio
             # Thời gian thật của cửa sổ 2s
@@ -1004,103 +747,96 @@ async def ws_transcribe(ws: WebSocket):
                     print("result['words']: ", result["words"])
                     print("---")
 
-                    # t0 = time_offset
-                    # t1 = time_offset + 1.0
-                    # lang_code = result.get("language")
+                    t0 = time_offset
+                    t1 = time_offset + 1.0
+                    lang_code = result.get("language")
 
-                    # # Gộp carry_over từ cửa sổ trước (chúng đang treo do sát mép)
-                    # words = (carry_over_words or []) + (result.get("words", []) or [])
-                    # # Lọc các từ thuộc 1 giây mới (cho overlap để không cắt từ ở biên)
-                    # if last_emitted_word:
-                    #     new_words = [w for w in words if _overlap(w["start"], w["end"], t0 - 0.1, t1 + 0.1)]
-                    # else:
-                    #     new_words = words
-                    # print("new_words: ", new_words)
-                    # print("---")
+                    # Gộp carry_over từ cửa sổ trước (chúng đang treo do sát mép)
+                    words = (carry_over_words or []) + (result.get("words", []) or [])
+                    # Lọc các từ thuộc 1 giây mới (cho overlap để không cắt từ ở biên)
+                    if last_emitted_word:
+                        new_words = [w for w in words if _overlap(w["start"], w["end"], t0 - 0.1, t1 + 0.1)]
+                    else:
+                        new_words = words
+                    print("new_words: ", new_words)
+                    print("---")
 
-                    # # Chia 2 nhóm: commit ngay vs treo lại (sát mép phải)
-                    # commit_now = []
-                    # next_carry = []  # carry cho vòng sau
-                    # for w in new_words:
-                    #     if w["end"] is not None and w["end"] > (t1 - COMMIT_DELAY):
-                    #         next_carry.append(w)    # treo lại → đợi cửa sổ sau xác nhận
-                    #     else:
-                    #         commit_now.append(w)    # an toàn để emit
+                    # Chia 2 nhóm: commit ngay vs treo lại (sát mép phải)
+                    commit_now = []
+                    next_carry = []  # carry cho vòng sau
+                    for w in new_words:
+                        if w["end"] is not None and w["end"] > (t1 - COMMIT_DELAY):
+                            next_carry.append(w)    # treo lại → đợi cửa sổ sau xác nhận
+                        else:
+                            commit_now.append(w)    # an toàn để emit
                     
-                    # print("commit_now: ", commit_now)
-                    # print("---")
-                    # print("next_carry: ", next_carry)
-                    # print("---")
+                    print("commit_now: ", commit_now)
+                    print("---")
+                    print("next_carry: ", next_carry)
+                    print("---")
 
-                    # # Dedupe theo emitted_until + trùng chữ ở mép
-                    # commit_now = _dedupe_boundary(commit_now, emitted_until, last_emitted_word, last_emitted_end)
+                    # Dedupe theo emitted_until + trùng chữ ở mép
+                    commit_now = _dedupe_boundary(commit_now, emitted_until, last_emitted_word, last_emitted_end)
 
-                    # print("commit_now after dedupe: ", commit_now)
-                    # print("---")
+                    print("commit_now after dedupe: ", commit_now)
+                    print("---")
 
-                    # commit_now = _dedupe_commit_now(commit_now)
-                    # print("commit_now after dedupe_commit_now: ", commit_now)
-                    # print("---")
+                    commit_now = _dedupe_commit_now(commit_now)
+                    print("commit_now after dedupe_commit_now: ", commit_now)
+                    print("---")
 
-                    # # Emit
-                    # if commit_now:
-                    #     base_text = _smart_join(commit_now, lang_code)
-                    #     print("base_text: ", base_text)
-                    if True:
-                        new_text = result.get("text", "").strip();
-                        new_timestamps = result.get("words", [])
-                        if end_speech:
-                            if speaker_label:
-                                full_transcript += f"/newline{speaker_label}: {new_text}"
+                    # Emit
+                    if commit_now:
+                        base_text = _smart_join(commit_now, lang_code)
+                        print("base_text: ", base_text)
+
+                        if base_text:
+                            if end_speech:
+                                if speaker_label:
+                                    result_text = f"/newline{speaker_label}: {base_text}"
+                                else:
+                                    result_text = f"/newline{base_text}"
                             else:
-                                full_transcript += new_text
-                        else:
-                            if result.get("language") != "ja":
-                                full_transcript = merge_with_internal_overlap(full_transcript, new_text, full_timestamps, new_timestamps)
-                            else:
-                                full_transcript = get_follow_text_jp(full_transcript, new_text)
-                        full_timestamps.extend(new_timestamps)
+                                result_text = base_text
                             
-                        
-                        if result.get("language") != "ja":
-                            result_text = full_transcript.replace("||", " ")
-                        else:
-                            result_text = full_transcript.replace("||", "")
-                        print("full_transcript: ", full_transcript)
-                        print("full_timestamps: ", full_timestamps)
-                        print("---")
-                        
-                        await ws.send_text(json.dumps({
-                            "type": "full",
-                            "speaker_id": speaker_label,
-                            "language": result.get("language"),
-                            "language_probability": result.get("language_probability"),
-                            "text": result_text,
-                            # "words": commit_now,
-                            "segments": result.get("segments", []),
-                            # "window": {"t0": t0, "t1": t1}
-                        }))
-                        logger.debug(f"[WS] Sent full: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
-                        # # Cập nhật state dedupe
-                        # # mốc đã phát: max end trong commit_now
-                        # emitted_until = max(emitted_until, max(w["end"] for w in commit_now if w["end"] is not None))
-                        # # nhớ từ cuối
-                        # last = commit_now[-1]
-                        # last_emitted_word = last["word"]
-                        # last_emitted_end = last["end"] or last_emitted_end
-                        # # Cập nhật carry_over cho vòng sau (chỉ giữ phần "chưa commit")
-                        # carry_over_words = next_carry
-                        # print("emitted_until: ", emitted_until)
-                        # print("carry_over_words: ", carry_over_words)
-                        # print("last_emitted_word: ", last_emitted_word)
-                        # print("last_emitted_end: ", last_emitted_end)
-                        end_speech = False
+                            if result.get("language") != "ja":
+                                result_text = result_text.replace("||", " ")
+                            else:
+                                result_text = result_text.replace("||", "")
+                            print("result_text: ", result_text)
+                            print("---")
+                            
+                            await ws.send_text(json.dumps({
+                                "type": "partial",
+                                "speaker_id": speaker_label,
+                                "language": result.get("language"),
+                                "language_probability": result.get("language_probability"),
+                                "text": result_text,
+                                "words": commit_now,
+                                "segments": result.get("segments", []),
+                                "window": {"t0": t0, "t1": t1}
+                            }))
+                            logger.debug(f"[WS] Sent partial: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
+                            # Cập nhật state dedupe
+                            # mốc đã phát: max end trong commit_now
+                            emitted_until = max(emitted_until, max(w["end"] for w in commit_now if w["end"] is not None))
+                            # nhớ từ cuối
+                            last = commit_now[-1]
+                            last_emitted_word = last["word"]
+                            last_emitted_end = last["end"] or last_emitted_end
+                            # Cập nhật carry_over cho vòng sau (chỉ giữ phần "chưa commit")
+                            carry_over_words = next_carry
+                            print("emitted_until: ", emitted_until)
+                            print("carry_over_words: ", carry_over_words)
+                            print("last_emitted_word: ", last_emitted_word)
+                            print("last_emitted_end: ", last_emitted_end)
+                            end_speech = False
 
             # Cập nhật time_offset cho chunk tiếp theo
             time_offset += buffer_duration
-            # print("--------------------------------")
-            # print("--------------------------------")
-            # print("--------------------------------")
+            print("--------------------------------")
+            print("--------------------------------")
+            print("--------------------------------")
         except Exception as e:
             logger.error(f"[WS] Transcription error: {str(e)}", exc_info=True)
             await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
