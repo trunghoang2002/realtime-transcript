@@ -52,7 +52,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -------- Model config ----------
-MODEL_NAME = "small"   # đổi thành "medium" hoặc "large-v3" nếu máy khỏe
+MODEL_NAME = "small"   # "small" , "medium" , "large-v3"
 DEVICE = "cuda"         # "cuda" nếu có GPU, "cpu" nếu không có GPU
 COMPUTE_TYPE = "float16"  # "float16" trên GPU, "int8" hoặc "int8_float16" trên CPU
 
