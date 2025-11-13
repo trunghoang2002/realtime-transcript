@@ -1,6 +1,6 @@
-spk_01: Hey Mark. Have you got any plants? the weekend. 
-spk_01: Not really. I was thinking of ju- staying home. catching up on some sleep. Oh come on. 
-spk_02: It's been ages since we... anywhere. How about a quick road trip to the ma... mountains. The weather support... to be perfect. 
-spk_01: just sound tempting. What do you think we can manage? it with such short notes. Hotels might be- full already. 
-spk_02: Don't worry. I checked the I checked the morning. There's still a few cozy c- happens available. early Saturday. and be back by Sunday night. night. 
-spk_01: That actually sounds... great. Alright. count me in I'll bring snacks music for the drive. 
+spk_02: Hey Mark, have you got any plans for the weekend?
+spk_01: Not really. I was thinking of just staying home and catching up on some sleep. Oh, come on. It's been ages since we went anywhere.
+spk_02: about a quick road trip to the mountains. The weather is supposed to be perfect.
+spk_01: That does sound tempting, but do you think we can manage it with such short notice? Hotels might be full already.
+spk_02: Don't worry, I checked this morning. There are still a few cozy cabins available. We could leave early Saturday and be back by Sunday night.
+spk_01: That actually sounds great. All right. Count me in. I'll bring snive

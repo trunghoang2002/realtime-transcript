@@ -8,7 +8,10 @@
 
 ## ✨ Tính năng
 
-- **Realtime Transcription**: Chuyển đổi giọng nói thành văn bản theo thời gian thực qua WebSocket (stream Full Transcript + Segments có timestamp)
+- **Realtime Transcription**: Chuyển đổi giọng nói thành văn bản theo thời gian thực qua WebSocket với 2 loại messages:
+  - **Partial messages**: Transcript tạm thời từ buffer ~1s (độ trễ thấp)
+  - **Full messages**: Transcript chính xác hơn từ toàn bộ đoạn speech khi phát hiện kết thúc (độ chính xác cao)
+- **Smart Buffer Management**: Tự động tích lũy audio và transcribe lại với cấu hình tốt hơn khi phát hiện kết thúc đoạn speech
 - **File Upload**: Upload và transcribe file audio/video (mp3, wav, m4a, mp4, avi, mov, ...), trả về full transcript và danh sách segments có timestamp
 - **Speaker Detection (Nhận diện người nói)**: Tùy chọn nhận diện và phân biệt nhiều người nói trong audio, hỗ trợ cấu hình số lượng người nói tối đa (mặc định: 2)
 - **Đa ngôn ngữ**: Hỗ trợ nhiều ngôn ngữ với tự động phát hiện ngôn ngữ
@@ -170,16 +173,33 @@ Kết nối WebSocket để realtime transcription.
 
 3. Server trả về:
 ```json
-{"type": "ready"}
-{"type": "partial", "text": "...", "speaker_id": "spk_01", "language": "vi", "language_probability": 0.95, "segments": [{"start": 0.0, "end": 1.0, "text": "...", "speaker_id": "spk_01"}]}
-{"type": "final", "text": ""}
+{"type": "ready"}  // Khi sẵn sàng nhận audio
+{"type": "partial", "text": "...", "speaker_id": "spk_01", "language": "vi", "language_probability": 0.95, "segments": [{"start": 0.0, "end": 1.0, "text": "...", "speaker_id": "spk_01"}]}  // Transcript tạm thời từ buffer ~1s
+{"type": "full", "text": "...", "speaker_id": "spk_01", "language": "vi", "language_probability": 0.95, "segments": [...]}  // Transcript chính xác từ toàn bộ đoạn speech (khi phát hiện kết thúc)
+{"type": "final", "text": ""}  // Khi session kết thúc
 {"type": "error", "message": "..."}  // Nếu có lỗi
+{"type": "pong"}  // Phản hồi cho ping
 ```
 
-4. Client gửi để dừng:
+**Lưu ý về Partial vs Full messages:**
+- **Partial**: Được gửi liên tục từ buffer ~1s, có độ trễ thấp nhưng độ chính xác có thể chưa tối ưu
+- **Full**: Được gửi khi phát hiện kết thúc đoạn speech (silence hoặc repeated substring), transcribe lại với cấu hình tốt hơn (beam_size=5, best_of=5 cho Whisper hoặc batch_size_s=20 cho SenseVoice) để có độ chính xác cao hơn
+- Frontend tự động thay thế phần partial tương ứng bằng full text khi nhận được full message
+
+4. Client có thể gửi ping để kiểm tra kết nối:
+```json
+{"event": "ping"}
+```
+Server sẽ trả về `{"type": "pong"}`
+
+5. Client gửi để dừng:
 ```json
 {"event": "stop"}
 ```
+Khi nhận được stop, server sẽ:
+- Flush phần còn lại trong buffer
+- Transcribe lại full_buffer nếu còn (nếu chưa được gửi)
+- Gửi final message và đóng kết nối
 
 ### REST API: `POST /api/transcribe`
 
@@ -272,7 +292,11 @@ realtime-transcript/
 
 #### Backend Core Files
 - **`main.py`**: Server chính sử dụng Whisper model (`faster-whisper`) cho realtime và file transcription
+  - Realtime: Dual-buffer strategy với partial và full messages
+  - File upload: Transcribe với cấu hình tối ưu cho độ chính xác
 - **`main_sensevoice.py`**: Server thay thế sử dụng SenseVoice model (`funasr`) với khả năng fallback timestamp tốt hơn
+  - Realtime: Tương tự Whisper với dual-buffer strategy
+  - File upload: Hỗ trợ multi-language detection và fallback timestamp synthesis
 
 #### Utility Modules
 - **`get_audio.py`**: Xử lý decode audio/video files thành numpy array (16kHz mono) sử dụng `av` (PyAV)
@@ -308,8 +332,13 @@ realtime-transcript/
 3. Nhấn **"Start"** và cho phép truy cập microphone
    - Các tùy chọn cấu hình sẽ tự động bị disable khi đang xử lý
 4. Bắt đầu nói, transcript sẽ hiển thị theo thời gian thực theo 2 phần:
-   - **Full Transcript**: Nối liên tục nội dung (có speaker ID nếu bật detect speaker)
+   - **Full Transcript**: 
+     - Hiển thị partial text tạm thời từ buffer ~1s (độ trễ thấp)
+     - Tự động được thay thế bằng full text chính xác hơn khi phát hiện kết thúc đoạn speech
+     - Có speaker ID nếu bật detect speaker
    - **Segments**: Danh sách các đoạn có timestamp (start → end) và speaker ID (nếu có)
+     - Segments từ partial messages được thêm vào liên tục
+     - Segments từ full messages có thể cập nhật/thay thế segments tương ứng
 5. Nhấn **"Stop"** để dừng
    - Các tùy chọn cấu hình sẽ được enable lại
 
@@ -352,17 +381,22 @@ Hoặc chỉnh sửa function `getWebSocketUrl()` trong JavaScript để thay đ
 
 ### Tối ưu hóa cho realtime
 
-Trong `run_transcribe_on_buffer()`:
-- `beam_size=1`: Tối ưu tốc độ
+**Partial transcription** (trong `run_transcribe_on_buffer()`):
+- `beam_size=1`: Tối ưu tốc độ cho streaming
 - `best_of=1`: Tối ưu tốc độ
-- `condition_on_previous_text=False`: Giảm độ trễ
+- `condition_on_previous_text=False`: Giảm độ trễ, các chunk độc lập
+
+**Full transcription** (trong `run_transcribe_on_full_buffer()`):
+- Whisper: `beam_size=5`, `best_of=5`: Tăng độ chính xác khi transcribe lại toàn bộ đoạn speech
+- SenseVoice: `batch_size_s=20`: Tăng batch size để chính xác hơn
+- Được gọi tự động khi phát hiện kết thúc đoạn speech (silence hoặc repeated substring)
 
 ### Tối ưu hóa cho file upload
 
 Trong `transcribe_file()`:
-- `beam_size=5`: Tăng độ chính xác
-- `best_of=5`: Tăng độ chính xác
-- `condition_on_previous_text=True`: Sử dụng ngữ cảnh
+- Whisper: `beam_size=5`, `best_of=5`: Tăng độ chính xác
+- SenseVoice: `batch_size_s=20`: Tăng batch size
+- `condition_on_previous_text=True` (Whisper): Sử dụng ngữ cảnh
 
 ## 🐛 Troubleshooting
 
@@ -401,19 +435,29 @@ Trong `transcribe_file()`:
 
 - Model Whisper/SenseVoice được tải tự động lần đầu chạy
 - File tạm sẽ tự động xóa sau khi xử lý xong
-- Realtime transcription sử dụng buffer ~1 giây để giảm độ trễ
+- **Realtime transcription sử dụng dual-buffer strategy**:
+  - **recv_buffer**: Buffer ~1s để transcribe nhanh và gửi partial messages (độ trễ thấp)
+  - **full_buffer**: Tích lũy toàn bộ audio của một đoạn speech, được transcribe lại với cấu hình tốt hơn khi phát hiện kết thúc
+  - Kết thúc đoạn speech được phát hiện bằng: silence detection hoặc repeated substring detection
 - Với video files, audio sẽ được extract tự động nếu có ffmpeg
 - **Speaker Detection**: Sử dụng SpeechBrain ECAPA-TDNN model để nhận diện người nói
   - Speaker ID được gán dạng `spk_01`, `spk_02`, ...
-  - Hệ thống tự động học và cập nhật embedding của từng speaker
+  - Hệ thống tự động học và cập nhật embedding của từng speaker với exponential moving average
   - Khi vượt quá `max_speakers`, hệ thống sẽ gán audio mới cho speaker gần nhất
+  - Speaker tracking được reset cho mỗi session (WebSocket connection hoặc file upload)
 - **RTF (Real-Time Factor)**: 
   - RTF = processing_time / audio_duration
   - RTF < 1.0: Xử lý nhanh hơn thời gian thực (tốt)
   - RTF = 1.0: Xử lý bằng thời gian thực
   - RTF > 1.0: Xử lý chậm hơn thời gian thực
+- **Partial vs Full Messages**:
+  - Partial messages: Được gửi liên tục từ buffer ~1s, có độ trễ thấp
+  - Full messages: Được gửi khi phát hiện kết thúc đoạn speech, có độ chính xác cao hơn
+  - Frontend tự động thay thế phần partial tương ứng bằng full text để cải thiện chất lượng transcript
+- **Repeated Substring Detection**: Hệ thống tự động phát hiện chuỗi lặp lại (≥5 lần) để xác định kết thúc đoạn speech và trigger full transcription
 - Các tùy chọn cấu hình tự động bị disable khi đang xử lý để tránh thay đổi không mong muốn
 - Hệ thống tự động hiển thị/ẩn các phần tử UI dựa trên trạng thái (chỉ hiện transcript khi đang ghi)
+- WebSocket hỗ trợ ping/pong để kiểm tra kết nối
 
 ## 🔧 Dependencies
 
