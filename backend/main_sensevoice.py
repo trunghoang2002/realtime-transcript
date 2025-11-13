@@ -176,6 +176,24 @@ def get_speaker_id(audio_f32: np.ndarray, debug=False, max_speakers=None):
     speaker_counts.append(1)
     return f"spk_{len(registered_speakers):02d}"
 
+def has_repeated_substring(s: str, min_repeat: int = 5, min_len: int = 1) -> bool:
+    """
+    Phát hiện xem trong chuỗi s có tồn tại substring (độ dài >= min_len)
+    bị lặp lại liên tiếp ít nhất min_repeat lần hay không.
+    """
+    n = len(s)
+    for length in range(min_len, n // min_repeat + 1):  # độ dài substring
+        for i in range(0, n - length * min_repeat + 1):
+            sub = s[i:i+length]
+            count = 1
+            # kiểm tra liên tiếp
+            while i + count * length + length <= n and s[i + count * length:i + (count + 1) * length] == sub:
+                count += 1
+            if count >= min_repeat:
+                logger.warning(f"Repeated substring: {sub} in {s}")
+                return True
+    return False
+
 # -------- App ----------
 app = FastAPI(title="Realtime Transcript API (SenseVoice)", version="1.0.0")
 
@@ -448,6 +466,109 @@ async def transcribe_uploaded_file(
             except Exception as e:
                 logger.warning(f"[API] Failed to delete temp file {tmp_path}: {e}")
 
+async def run_transcribe_on_full_buffer(
+    audio_buffer: bytes,
+    lang_hint: Optional[str] = None,
+    time_offset: float = 0.0,
+    detect_speaker: bool = False,
+    max_speakers: Optional[int] = 2,
+) -> dict:
+    """
+    Chạy ASR trên full buffer với cấu hình tốt hơn để có độ chính xác cao.
+    Sử dụng batch_size_s lớn hơn để có kết quả chính xác hơn.
+    """
+    audio_f32 = pcm16_to_float32(audio_buffer)
+    if audio_f32.size == 0:
+        return {"text": "", "segments": []}
+    
+    # Cần tối thiểu ~0.5s audio để transcribe (8000 samples @ 16kHz)
+    MIN_SAMPLES = 8000
+    if audio_f32.size < MIN_SAMPLES:
+        return {"text": "", "segments": []}
+    
+    normalized_max_speakers: Optional[int] = None
+    if detect_speaker:
+        try:
+            normalized_max_speakers = max(1, int(max_speakers if max_speakers is not None else 2))
+        except (TypeError, ValueError):
+            normalized_max_speakers = 2
+
+    try:
+        # VAD filter
+        vad_options = VadOptions(min_silence_duration_ms=800)
+        speech_chunks = get_speech_timestamps(audio_f32, vad_options)
+        if len(speech_chunks) == 0:
+            return {"text": "", "segments": []}
+        
+        audio_f32 = collect_chunks(audio_f32, speech_chunks)
+
+        speaker_id = None
+        if detect_speaker:
+            speaker_id = get_speaker_id(
+                audio_f32,
+                debug=True,
+                max_speakers=normalized_max_speakers,
+            )
+            print("speaker_id (full): ", speaker_id)
+
+        # SenseVoice: transcribe với cấu hình tốt hơn để có độ chính xác cao
+        res = model.generate(
+            input=audio_f32,
+            cache={},
+            language=lang_hint or "auto",
+            use_itn=False,
+            batch_size_s=20,  # Tăng batch size để chính xác hơn
+        )
+
+        # SenseVoice trả list các dict, có thể có timestamp
+        full_texts = []
+        segments_list = []
+        languages = []
+        for r in res:
+            if "text" in r and r["text"]:
+                text = r["text"].strip()
+                if text:
+                    languages.extend(extract_language_codes(text))
+                    full_texts.append(text)
+                    # Nếu có timestamp, dùng nó; nếu không, ước tính từ buffer
+                    if "timestamp" in r and len(r["timestamp"]) >= 2:
+                        segment_entry = {
+                            "start": round(r["timestamp"][0] + time_offset, 2),
+                            "end": round(r["timestamp"][1] + time_offset, 2),
+                            "text": re.sub(r"<\|[^|>]+\|>", "", text).strip(),
+                        }
+                    else:
+                        # Ước tính timestamp từ buffer size
+                        buffer_duration = len(audio_buffer) / 2 / 16000
+                        segment_entry = {
+                            "start": round(time_offset, 2),
+                            "end": round(time_offset + buffer_duration, 2),
+                            "text": re.sub(r"<\|[^|>]+\|>", "", text).strip(),
+                        }
+                    if speaker_id:
+                        segment_entry["speaker_id"] = speaker_id
+                    segments_list.append(segment_entry)
+
+        if lang_hint and lang_hint.lower() != "auto":
+            dominant_lang = lang_hint
+            language_probability = 1.0
+        else:
+            dominant_lang, language_probability = get_dominant_language(languages)
+
+        return {
+            "speaker_id": speaker_id,
+            "language": dominant_lang,
+            "language_probability": round(language_probability, 2),
+            "text": re.sub(r"<\|[^|>]+\|>", "", " ".join(full_texts)).strip(),
+            "segments": segments_list,
+        }
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "empty" in error_msg or "max()" in error_msg or "sequence" in error_msg:
+            return {"text": "", "segments": []}
+        print(f"Full transcription error: {e}")
+        raise
+
 async def run_transcribe_on_buffer(
     audio_buffer: bytes,
     lang_hint: Optional[str] = None,
@@ -560,6 +681,13 @@ async def run_transcribe_on_buffer(
 # ---- WebSocket endpoint ----
 @app.websocket("/ws")
 async def ws_transcribe(ws: WebSocket):
+    """
+    Giao thức đơn giản:
+    - Client gửi trước 1 JSON: {"event":"start","sample_rate":16000,"format":"pcm16","language":"vi|auto"}
+    - Sau đó gửi các frame nhị phân (bytes PCM16 mono 16kHz).
+    - Gửi {"event":"stop"} để kết thúc.
+    - Server trả JSON: {"type":"partial","text": "..."} liên tục; và {"type":"final","text":"..."} khi stop.
+    """
     client_ip = ws.client.host if ws.client else "unknown"
     session_start = datetime.now()
     logger.info(f"[WS] WebSocket connection request from {client_ip}")
@@ -575,8 +703,13 @@ async def ws_transcribe(ws: WebSocket):
     total_bytes_received = 0
     total_segments_sent = 0
 
+    # buffer: gom ~1s audio rồi nhận dạng
+    # 1s PCM16 mono 16kHz = 16000 samples * 2 bytes = 32000 bytes
     CHUNK_TARGET_BYTES = 32000
+
     recv_buffer = bytearray()
+    full_buffer = bytearray()  # Lưu trữ toàn bộ audio của một đoạn speech
+    full_buffer_start_time = 0.0  # Thời gian bắt đầu của full_buffer
     running = True
     time_offset = 0.0  # Track thời gian tích lũy từ đầu session
     end_speech = False
@@ -588,7 +721,8 @@ async def ws_transcribe(ws: WebSocket):
     speaker_counts = []
 
     async def flush_and_transcribe():
-        nonlocal recv_buffer, time_offset, total_segments_sent, end_speech
+        """Chạy ASR trên buffer hiện tại và gửi partial về client."""
+        nonlocal recv_buffer, time_offset, total_segments_sent, end_speech, full_buffer, full_buffer_start_time
         if len(recv_buffer) == 0:
             return
         try:
@@ -596,24 +730,84 @@ async def ws_transcribe(ws: WebSocket):
             transcribe_start = datetime.now()
             # Tính thời gian của buffer này (bytes / 2 / sample_rate = seconds)
             buffer_duration = buffer_size / 2 / sample_rate
+            
+            # Lưu buffer hiện tại vào full_buffer trước khi transcribe
+            current_buffer_bytes = bytes(recv_buffer)
+            
+            # Nếu full_buffer rỗng, đây là bắt đầu của một đoạn speech mới
+            if len(full_buffer) == 0:
+                full_buffer_start_time = time_offset
+            
             result = await run_transcribe_on_buffer(
-                bytes(recv_buffer),
+                current_buffer_bytes,
                 lang_hint,
                 time_offset,
                 detect_speaker=detect_speaker_enabled,
                 max_speakers=max_speakers_limit if detect_speaker_enabled else None,
             )
             transcribe_time = (datetime.now() - transcribe_start).total_seconds()
-            recv_buffer = bytearray()
+            recv_buffer = bytearray()  # reset buffer sau mỗi lần flush
+            
             if result["text"]:
-                if result["text"] == "silence":
+                if result["text"] == "silence" or has_repeated_substring(result["text"]):
                     end_speech = True
                     print("end_speech: ", end_speech)
+                    
+                    # Khi phát hiện end_speech, transcribe lại trên full_buffer với cấu hình tốt hơn
+                    if len(full_buffer) > 0:
+                        try:
+                            full_transcribe_start = datetime.now()
+                            full_result = await run_transcribe_on_full_buffer(
+                                bytes(full_buffer),
+                                lang_hint,
+                                full_buffer_start_time,
+                                detect_speaker=detect_speaker_enabled,
+                                max_speakers=max_speakers_limit if detect_speaker_enabled else None,
+                            )
+                            full_transcribe_time = (datetime.now() - full_transcribe_start).total_seconds()
+                            
+                            if full_result["text"] and not has_repeated_substring(full_result["text"]):
+                                speaker_label = full_result.get("speaker_id")
+                                full_text = full_result.get("text", "")
+                                
+                                # Format text với speaker label nếu có
+                                if speaker_label:
+                                    formatted_full_text = f"{speaker_label}: {full_text}"
+                                else:
+                                    formatted_full_text = full_text
+                                
+                                print("full_result_text: ", formatted_full_text)
+                                print("--------------------------------")
+                                
+                                await ws.send_text(json.dumps({
+                                    "type": "full",
+                                    "speaker_id": speaker_label,
+                                    "language": full_result.get("language"),
+                                    "language_probability": full_result.get("language_probability"),
+                                    "text": formatted_full_text,
+                                    "segments": full_result.get("segments", []),
+                                }))
+                                
+                                full_segments_count = len(full_result.get("segments", []))
+                                logger.info(f"[WS] Sent full: segments={full_segments_count}, text_length={len(full_text)}, transcribe_time={full_transcribe_time:.3f}s, full_buffer_size={len(full_buffer)} bytes")
+                            
+                            # Reset full_buffer sau khi đã transcribe và gửi
+                            full_buffer = bytearray()
+                            full_buffer_start_time = 0.0
+                        except Exception as e:
+                            logger.error(f"[WS] Full transcription error: {str(e)}", exc_info=True)
+                            # Vẫn reset full_buffer để tránh tích lũy quá nhiều
+                            full_buffer = bytearray()
+                            full_buffer_start_time = 0.0
                 else:
+                    # Lưu buffer vào full_buffer (chỉ khi không phải silence)
+                    full_buffer.extend(current_buffer_bytes)
+                    
                     segments_count = len(result.get("segments", []))
                     total_segments_sent += segments_count
                     speaker_label = result.get("speaker_id")
                     base_text = result.get("text", "")
+
                     if end_speech:
                         if speaker_label:
                             result_text = f"/newline{speaker_label}: {base_text}"
@@ -621,22 +815,23 @@ async def ws_transcribe(ws: WebSocket):
                             result_text = f"/newline{base_text}"
                     else:
                         result_text = base_text
-                    if result["language"] != "ja":
+                    if result.get("language") != "ja":
                         result_text = result_text.replace("||", " ")
                     else:
                         result_text = result_text.replace("||", "")
                     print("result_text: ", result_text)
+                    print("--------------------------------")
                     await ws.send_text(json.dumps({
                         "type": "partial",
                         "speaker_id": speaker_label,
-                        "language": result["language"],
-                        "language_probability": result["language_probability"],
+                        "language": result.get("language"),
+                        "language_probability": result.get("language_probability"),
                         "text": result_text,
-                        "segments": result["segments"]
+                        "segments": result.get("segments", []),
                     }))
-
                     logger.debug(f"[WS] Sent partial: segments={segments_count}, text_length={len(result['text'])}, transcribe_time={transcribe_time:.3f}s, buffer_size={buffer_size} bytes")
                     end_speech = False
+            
             # Cập nhật time_offset cho chunk tiếp theo
             time_offset += buffer_duration
         except Exception as e:
@@ -646,14 +841,19 @@ async def ws_transcribe(ws: WebSocket):
     try:
         while running:
             msg = await ws.receive()
+
             if msg["type"] == "websocket.receive":
                 if "text" in msg:
+                    # Control message
                     try:
                         payload = json.loads(msg["text"])
                     except Exception:
+                        # Bỏ qua text không hợp lệ
                         continue
+
                     event = payload.get("event")
                     if event == "start":
+                        sample_rate = int(payload.get("sample_rate", 16000))
                         fmt = payload.get("format", "pcm16")
                         lang = payload.get("language")
                         if lang and lang.lower() != "auto":
@@ -669,9 +869,15 @@ async def ws_transcribe(ws: WebSocket):
                                 max_speakers_limit = 2
                         else:
                             max_speakers_limit = None
+                        # Reset speaker tracking for new session
+                        registered_speakers = []
+                        speaker_counts = []
                         # Reset time offset khi bắt đầu session mới
                         time_offset = 0.0
                         recv_buffer = bytearray()
+                        full_buffer = bytearray()
+                        full_buffer_start_time = 0.0
+                        end_speech = False
                         total_bytes_received = 0
                         total_segments_sent = 0
                         session_start = datetime.now()
@@ -684,18 +890,65 @@ async def ws_transcribe(ws: WebSocket):
                             max_speakers_limit if max_speakers_limit is not None else "n/a",
                             client_ip,
                         )
+                        # OK
                         await ws.send_text(json.dumps({"type": "ready"}))
                         logger.info(f"[WS] Ready message sent to {client_ip}")
+
                     elif event == "stop":
                         logger.info(f"[WS] Stop event received from {client_ip}")
+                        # Flush phần còn lại để trả final
                         await flush_and_transcribe()
+                        
+                        # Nếu còn full_buffer, transcribe và gửi full transcript
+                        if len(full_buffer) > 0:
+                            try:
+                                full_result = await run_transcribe_on_full_buffer(
+                                    bytes(full_buffer),
+                                    lang_hint,
+                                    full_buffer_start_time,
+                                    detect_speaker=detect_speaker_enabled,
+                                    max_speakers=max_speakers_limit if detect_speaker_enabled else None,
+                                )
+                                
+                                if full_result["text"]:
+                                    speaker_label = full_result.get("speaker_id")
+                                    full_text = full_result.get("text", "")
+                                    
+                                    if speaker_label:
+                                        formatted_full_text = f"{speaker_label}: {full_text}"
+                                    else:
+                                        formatted_full_text = full_text
+                                    
+                                    await ws.send_text(json.dumps({
+                                        "type": "full",
+                                        "speaker_id": speaker_label,
+                                        "language": full_result.get("language"),
+                                        "language_probability": full_result.get("language_probability"),
+                                        "text": formatted_full_text,
+                                        "segments": full_result.get("segments", []),
+                                    }))
+                                    logger.info(f"[WS] Sent final full transcript: text_length={len(full_text)}")
+                            except Exception as e:
+                                logger.error(f"[WS] Final full transcription error: {str(e)}", exc_info=True)
+                        
                         await ws.send_text(json.dumps({"type": "final", "text": ""}))
                         
                         session_duration = (datetime.now() - session_start).total_seconds()
                         logger.info(f"[WS] Session completed: client={client_ip}, duration={session_duration:.2f}s, total_bytes={total_bytes_received}, total_segments={total_segments_sent}")
                         
                         running = False
+
+                    elif event == "ping":
+                        logger.debug(f"[WS] Ping received from {client_ip}")
+                        await ws.send_text(json.dumps({"type": "pong"}))
+
                 elif "bytes" in msg:
+                    # Audio chunk
+                    if fmt != "pcm16":
+                        logger.warning(f"[WS] Unsupported audio format: {fmt} from {client_ip}")
+                        await ws.send_text(json.dumps({"type": "error", "message": "Unsupported audio format"}))
+                        continue
+
                     chunk = msg["bytes"]
                     if not chunk:
                         continue
@@ -703,6 +956,8 @@ async def ws_transcribe(ws: WebSocket):
                     total_bytes_received += chunk_size
                     recv_buffer.extend(chunk)
                     logger.debug(f"[WS] Received audio chunk: size={chunk_size} bytes, buffer_size={len(recv_buffer)}, total_received={total_bytes_received}")
+
+                    # Nếu đủ ~1 giây, transcribe ngay để mượt
                     if len(recv_buffer) >= CHUNK_TARGET_BYTES:
                         await flush_and_transcribe()
             elif msg["type"] == "websocket.disconnect":
@@ -723,8 +978,10 @@ async def ws_transcribe(ws: WebSocket):
             pass
 
 
+# ---- Serve frontend ----
 @app.get("/")
 async def read_root():
+    """Serve the frontend HTML file."""
     frontend_path = Path(__file__).parent.parent / "frontend" / "index.html"
     return FileResponse(frontend_path)
 

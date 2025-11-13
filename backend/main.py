@@ -184,6 +184,7 @@ def has_repeated_substring(s: str, min_repeat: int = 5, min_len: int = 1) -> boo
             while i + count * length + length <= n and s[i + count * length:i + (count + 1) * length] == sub:
                 count += 1
             if count >= min_repeat:
+                logger.warning(f"Repeated substring: {sub} in {s}")
                 return True
     return False
 
@@ -685,7 +686,7 @@ async def ws_transcribe(ws: WebSocket):
                             )
                             full_transcribe_time = (datetime.now() - full_transcribe_start).total_seconds()
                             
-                            if full_result["text"]:
+                            if full_result["text"] and not has_repeated_substring(full_result["text"]):
                                 speaker_label = full_result.get("speaker_id")
                                 full_text = full_result.get("text", "")
                                 
