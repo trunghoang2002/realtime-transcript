@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import os
 import re
+import uuid
 from typing import Optional
 from datetime import datetime
 import numpy as np
@@ -88,13 +89,14 @@ spk_model = EncoderClassifier.from_hparams(
     source="speechbrain/spkrec-ecapa-voxceleb",
     run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
 )
-registered_speakers = []  # lưu danh sách các vector trung bình của speaker
-speaker_counts = []  # số lần đã thấy speaker này (để tính moving average)
+# Quản lý state của speaker cho mỗi session (tránh xung đột giữa các user)
+# Key: session_id (str), Value: dict với 'registered_speakers' và 'speaker_counts'
+speaker_sessions: dict[str, dict] = {}
 speaker_threshold = 0.6  # cosine similarity ngưỡng nhận cùng người nói
 update_alpha = 0.3  # hệ số cho exponential moving average khi update embedding
 min_audio_length = 8000  # minimum 0.5 giây (16kHz) - chỉ pad khi quá ngắn
 
-def get_speaker_id(audio_f32: np.ndarray, debug=False, max_speakers=None):
+def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=False, max_speakers=None):
     """Nhận diện người nói bằng cosine similarity với cải thiện stability."""
 
     # === Reject nếu audio rỗng ===
@@ -136,6 +138,16 @@ def get_speaker_id(audio_f32: np.ndarray, debug=False, max_speakers=None):
     
     # Normalize embedding để ổn định hơn
     emb_norm = emb / (np.linalg.norm(emb) + 1e-8)
+
+    # Lấy hoặc tạo state cho session này
+    if session_id not in speaker_sessions:
+        speaker_sessions[session_id] = {
+            "registered_speakers": [],
+            "speaker_counts": []
+        }
+    
+    registered_speakers = speaker_sessions[session_id]["registered_speakers"]
+    speaker_counts = speaker_sessions[session_id]["speaker_counts"]
 
     # Nếu chưa có người nói nào, tạo mới
     if not registered_speakers:
@@ -237,11 +249,15 @@ async def transcribe_file(
     """
     Transcribe file audio/video (offline).
     """
-    # Reset registered_speakers và speaker_counts
-    global registered_speakers
-    registered_speakers = []
-    global speaker_counts
-    speaker_counts = []
+    # Tạo session_id duy nhất cho file này
+    file_session_id = f"file_{uuid.uuid4().hex[:8]}"
+
+    # Reset state cho session này
+    if file_session_id in speaker_sessions:
+        speaker_sessions[file_session_id] = {
+            "registered_speakers": [],
+            "speaker_counts": []
+        }
     
     normalized_max_speakers: Optional[int] = None
     if detect_speaker:
@@ -327,6 +343,7 @@ async def transcribe_file(
                 )
                 seg["speaker_id"] = get_speaker_id(
                     chunk,
+                    session_id=file_session_id,
                     debug=True,
                     max_speakers=normalized_max_speakers,
                 )
@@ -454,6 +471,7 @@ async def run_transcribe_on_buffer(
     time_offset: float = 0.0,
     detect_speaker: bool = False,
     max_speakers: Optional[int] = 2,
+    session_id: str = "default",
 ) -> dict:
     """
     Streaming transcript (SenseVoice).
@@ -495,6 +513,7 @@ async def run_transcribe_on_buffer(
             speech_audio = collect_chunks(audio_f32, speech_chunks)
             speaker_id = get_speaker_id(
                 speech_audio,
+                session_id=session_id,
                 debug=True,
                 max_speakers=normalized_max_speakers,
             )
@@ -567,6 +586,9 @@ async def ws_transcribe(ws: WebSocket):
     await ws.accept()
     logger.info(f"[WS] WebSocket connection accepted from {client_ip}")
     
+    # Tạo session_id duy nhất cho WebSocket connection này
+    ws_session_id = f"ws_{uuid.uuid4().hex[:8]}"
+
     sample_rate = 16000
     lang_hint = None
     fmt = "pcm16"
@@ -581,11 +603,12 @@ async def ws_transcribe(ws: WebSocket):
     time_offset = 0.0  # Track thời gian tích lũy từ đầu session
     end_speech = False
 
-    # Reset registered_speakers và speaker_counts
-    global registered_speakers
-    registered_speakers = []
-    global speaker_counts
-    speaker_counts = []
+    # Reset state cho session này
+    if ws_session_id in speaker_sessions:
+        speaker_sessions[ws_session_id] = {
+            "registered_speakers": [],
+            "speaker_counts": []
+        }
 
     async def flush_and_transcribe():
         nonlocal recv_buffer, time_offset, total_segments_sent, end_speech
@@ -602,6 +625,7 @@ async def ws_transcribe(ws: WebSocket):
                 time_offset,
                 detect_speaker=detect_speaker_enabled,
                 max_speakers=max_speakers_limit if detect_speaker_enabled else None,
+                session_id=ws_session_id,
             )
             transcribe_time = (datetime.now() - transcribe_start).total_seconds()
             recv_buffer = bytearray()
@@ -710,9 +734,19 @@ async def ws_transcribe(ws: WebSocket):
                 break
         await ws.close()
         logger.info(f"[WS] WebSocket connection closed for {client_ip}")
+
+        # Cleanup: xóa session để tránh memory leak
+        if ws_session_id in speaker_sessions:
+            del speaker_sessions[ws_session_id]
+            logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
+
     except WebSocketDisconnect:
         session_duration = (datetime.now() - session_start).total_seconds() if 'session_start' in locals() else 0
         logger.info(f"[WS] WebSocket disconnected: client={client_ip}, duration={session_duration:.2f}s")
+        # Cleanup session
+        if 'ws_session_id' in locals() and ws_session_id in speaker_sessions:
+            del speaker_sessions[ws_session_id]
+            logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
     except Exception as e:
         session_duration = (datetime.now() - session_start).total_seconds() if 'session_start' in locals() else 0
         logger.error(f"[WS] WebSocket error: client={client_ip}, error={str(e)}, duration={session_duration:.2f}s", exc_info=True)
@@ -721,6 +755,11 @@ async def ws_transcribe(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+        finally:
+            # Cleanup session
+            if 'ws_session_id' in locals() and ws_session_id in speaker_sessions:
+                del speaker_sessions[ws_session_id]
+                logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
 
 
 @app.get("/")
