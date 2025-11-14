@@ -16,36 +16,36 @@ def file_to_audio_data_url(file_path: str):
 
     return f"data:{mime_type};base64,{encoded_string}"
 
-audio_source_url =file_to_audio_data_url("TestJ.mp3")
+audio_source_url =file_to_audio_data_url("eval/TestJ.mp3")
 
 url = "https://trunghoang2002--qwen-audio-modal-serve-dev.modal.run/v1/chat/completions"
 # url = "https://trannguyen-06042002--example-vllm-inference-serve.modal.run/v1/chat/completions"
-url = "https://game-powerful-kit.ngrok-free.app/asr"
 
-# payload = {
-#     "messages": [
-#         {"role": "system", "content": "You are a helpful assistant."},
-#         {
-#             "role": "user",
-#             "content": [
-#                 {"type": "audio_url", "audio_url": {"url": audio_source_url}},
-#                 # {
-#                 #     "type": "audio",
-#                 #     "audio": {
-#                 #         "data": audio_base64,
-#                 #         "format": "wav"
-#                 #     }
-#                 # },
-#                 {"type": "text", "text": "Give me the transcription of the audio. Only provide the transcription without any additional information."}
-#             ]
-#         }
-#     ],
-#     "max_tokens": 50,
-#     "stream": False
-# }
 payload = {
-    "audio_url": audio_source_url
+    "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio_url", "audio_url": {"url": audio_source_url}},
+                # {
+                #     "type": "audio",
+                #     "audio": {
+                #         "data": audio_base64,
+                #         "format": "wav"
+                #     }
+                # },
+                {"type": "text", "text": "Give me the transcription of the audio. Only provide the transcription without any additional information or any other text."}
+            ]
+        }
+    ],
+    "max_tokens": 50,
+    "stream": False
 }
+# url = "https://game-powerful-kit.ngrok-free.app/asr"
+# payload = {
+#     "audio_url": audio_source_url
+# }
 
 headers = {"Content-Type": "application/json"}
 
@@ -75,5 +75,5 @@ response = requests.post(url, headers=headers, data=json.dumps(payload))
 
 print("Status code:", response.status_code)
 print("Response:")
-# print(response.json()["choices"][0]["message"]["content"])
-print(response.json()['transcription'])
+print(response.json()["choices"][0]["message"]["content"])
+# print(response.json()['transcription'])

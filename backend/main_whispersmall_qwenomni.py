@@ -628,7 +628,7 @@ async def run_transcribe_on_buffer(
         # Sử dụng vad_filter để bỏ im lặng; beam_size thấp để nhanh hơn.
         segments, info = model.transcribe(
             audio_f32,
-            language="ja",            # None -> auto-detect; "vi" -> tiếng Việt
+            language=lang_hint,            # None -> auto-detect; "vi" -> tiếng Việt
             vad_filter=False,
             beam_size=1,
             best_of=1,
