@@ -23,8 +23,8 @@ def eval(ground_truth_file, prediction_file):
     print("CER:", cer(ground_truth, prediction))
 
 lang = "ja" # ja | en
-type = "realtime" # realtime | upload
-model = "sensevoice-small" # sensevoice-small | whisper-small | whisper-medium
+type = "upload" # realtime | upload
+model = "qwen2-audio" # sensevoice-small | whisper-small | whisper-medium | 2-audio | qwen-omni
 
 ground_truth_file = f"{lang}/ground_truth_full.txt"
 prediction_file = f"{lang}/{type}/{model}/predict_full.txt"
