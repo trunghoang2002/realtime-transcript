@@ -1,0 +1,8 @@
+spk_01: Hey Mark, have you got any plans for the weekend?
+spk_02: Really, I was thinking of just staying home and catching up on some sleep.
+spk_01: Come on. It's been ages since you went anywhere.
+spk_01: How about a quick road trip to the Netherlands?
+spk_01: that are supposed to be perfect.
+spk_02: That does sound tempting, but do you think we can manage it with such short notice? Hotels might be full
+spk_01: Don't worry. I checked this morning. There are still a few cozy cabins available. We could leave early Saturday and be back by Sunday night.
+spk_02: That actually sounds great. All right. Count me in. I'll bring snacks and music for the drive.
