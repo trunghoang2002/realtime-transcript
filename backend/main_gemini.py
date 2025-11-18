@@ -6,16 +6,15 @@ import tempfile
 from typing import Optional
 from datetime import datetime
 import uuid
-import requests
-import base64
-import io
-import soundfile as sf
-import re
+
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
+import dotenv
+
+dotenv.load_dotenv()
 
 # -------- Setup CUDA/cuDNN Library Path ----------
 # Tự động thêm cuDNN libraries vào LD_LIBRARY_PATH nếu chưa có
@@ -52,30 +51,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -------- Model config ----------
+MODEL_NAME = "gemini-2.5-flash-lite" # gemini-2.5-pro | gemini-2.5-flash | gemini-2.5-flash-lite
 DEVICE = "cuda"         # "cuda" nếu có GPU, "cpu" nếu không có GPU
-API_URL = "https://game-powerful-kit.ngrok-free.app/v1/chat/completions"
-HEADERS = {"Content-Type": "application/json"}
-PAYLOAD_TEMPLATE = {
-    "model": "qwen3-omni-30B",
-    "messages": [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "audio_url",
-                    "audio_url": {
-                        "url": None,
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": "Transcribe the audio into text."
-                }
-            ]
-        }
-    ]
-}
-MODEL_NAME = "small"   # "small" , "medium" , "large-v3"
+WHISPER_MODEL_NAME = "small"   # "small" , "medium" , "large-v3"
 COMPUTE_TYPE = "float16"  # "float16" trên GPU, "int8" hoặc "int8_float16" trên CPU
 
 if DEVICE == "cuda":
@@ -91,13 +69,41 @@ if DEVICE == "cuda":
     else:
         logger.warning("LD_LIBRARY_PATH không được set. Nếu gặp lỗi cuDNN, hãy chạy: ./run_main_with_cuda.sh")
 
+from google import genai
+from google.genai import types
 # -------- Whisper model ----------
 # Model gợi ý: "small" (nhanh) / "medium" (chính xác) / "large-v3" (nặng)
 from faster_whisper import WhisperModel
 from silero_vad import VadOptions, get_speech_timestamps, collect_chunks
 from get_audio import decode_audio
+import io
+import soundfile as sf
 
-model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+def get_transcript(audio: np.ndarray, sampling_rate: int = 16000) -> str:
+    # Ghi WAV vào memory buffer
+    buffer = io.BytesIO()
+    sf.write(buffer, audio, samplerate=sampling_rate, format="WAV")
+    buffer.seek(0)
+
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[
+            'Generate a transcript of the speech, only return the transcript, no other text, if there is no speech, return "no speech"',
+            types.Part.from_bytes(
+            data=buffer.read(),
+            mime_type='audio/wav',
+            )
+        ],
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=4096
+        )
+    )
+    return response.text
+
+model = WhisperModel(WHISPER_MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 
 # Patch SpeechBrain compatibility issue với huggingface_hub
 import fix_speechbrain  # Phải import TRƯỚC speechbrain
@@ -120,9 +126,16 @@ verification_model = SpeakerRecognition.from_hparams(
 # Quản lý state của speaker cho mỗi session (tránh xung đột giữa các user)
 # Key: session_id (str), Value: dict với 'registered_speakers' và 'speaker_counts'
 speaker_sessions: dict[str, dict] = {}
-speaker_threshold = 0.5  # cosine similarity ngưỡng nhận cùng người nói
+speaker_threshold = 0.5  # cosine similarity ngưỡng nhận cùng người nói với embedding ema
+centroid_threshold = 0.6  # cosine similarity ngưỡng nhận cùng người nói với centroid
 update_alpha = 0.3  # hệ số cho exponential moving average khi update embedding
 min_audio_length = 8000  # minimum 0.5 giây (16kHz) - chỉ pad khi quá ngắn
+
+def compute_centroid(emb_list):
+    if len(emb_list) == 0:
+        return None
+    centroid = np.mean(np.stack(emb_list), axis=0)
+    return centroid / (np.linalg.norm(centroid) + 1e-8)
 
 def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=False, max_speakers=None, speaker_sessions=speaker_sessions):
     """Nhận diện người nói bằng cosine similarity với cải thiện stability."""
@@ -171,23 +184,29 @@ def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=Fal
     if session_id not in speaker_sessions:
         speaker_sessions[session_id] = {
             "registered_speakers_wav": [],
-            "registered_speakers_emb": [],
+            "registered_speakers_emb_ema": [],
+            "registered_speakers_emb_list": [],
+            "registered_speakers_centroid": [],
             "speaker_counts": []
         }
     
     registered_speakers_wav = speaker_sessions[session_id]["registered_speakers_wav"]
-    registered_speakers_emb = speaker_sessions[session_id]["registered_speakers_emb"]
+    registered_speakers_emb_ema = speaker_sessions[session_id]["registered_speakers_emb_ema"]
+    registered_speakers_emb_list = speaker_sessions[session_id]["registered_speakers_emb_list"]
+    registered_speakers_centroid = speaker_sessions[session_id]["registered_speakers_centroid"]
     speaker_counts = speaker_sessions[session_id]["speaker_counts"]
 
     # Nếu chưa có người nói nào, tạo mới
     if not registered_speakers_wav:
         registered_speakers_wav.append(audio_f32)
-        registered_speakers_emb.append(emb_norm)
+        registered_speakers_emb_ema.append(emb_norm)
+        registered_speakers_emb_list.append([emb_norm])
+        registered_speakers_centroid.append(emb_norm)
         speaker_counts.append(1)
         return "spk_01", speaker_sessions
 
     # So khớp cosine với danh sách speaker đã biết (đã normalize nên chỉ cần dot product)
-    sims = [np.dot(emb_norm, s) for s in registered_speakers_emb]
+    sims = [np.dot(emb_norm, s) for s in registered_speakers_emb_ema]
     max_sim = max(sims)
     idx = np.argmax(sims)
     
@@ -195,18 +214,33 @@ def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=Fal
         print(f"  Similarities: {[f'{s:.3f}' for s in sims]}, max={max_sim:.3f}")
 
     # === Nếu mới chỉ có 1 speaker duy nhất và speaker_count = 1 thì giảm ngưỡng ===
-    if len(registered_speakers_wav) == 1 and speaker_counts[0] == 1:
-        speaker_threshold = 0.3
-    else:
-        speaker_threshold = 0.5
+    # if len(registered_speakers_wav) == 1 and speaker_counts[0] == 1:
+    #     speaker_threshold = 0.3
+    # else:
+    #     speaker_threshold = 0.5
 
     # === Nếu giống speaker cũ ===
     if max_sim > speaker_threshold:
         # Update speaker embedding với exponential moving average để ổn định hơn
         registered_speakers_wav[idx] = audio_f32.copy()
-        registered_speakers_emb[idx] = (1 - update_alpha) * registered_speakers_emb[idx] + update_alpha * emb_norm
+        registered_speakers_emb_ema[idx] = (1 - update_alpha) * registered_speakers_emb_ema[idx] + update_alpha * emb_norm
+        registered_speakers_emb_list[idx].append(emb_norm)
+        registered_speakers_centroid[idx] = compute_centroid(registered_speakers_emb_list[idx])
         speaker_counts[idx] += 1
         return f"spk_{idx+1:02d}", speaker_sessions
+    
+    # === Nếu giống speaker cũ bằng cosine similarity với centroid ===
+    cos_centroid = [np.dot(emb_norm, centroid) for centroid in registered_speakers_centroid]
+    max_cos_centroid = max(cos_centroid)
+    idx_cos_centroid = np.argmax(cos_centroid)
+
+    if debug:
+        print(f"  Cosine similarity with centroid: {[f'{c:.3f}' for c in cos_centroid]}, max={max_cos_centroid:.3f}")
+
+    if max_cos_centroid > centroid_threshold:
+        registered_speakers_emb_list[idx_cos_centroid].append(emb_norm)
+        registered_speakers_centroid[idx_cos_centroid] = compute_centroid(registered_speakers_emb_list[idx_cos_centroid])
+        return f"spk_{idx_cos_centroid+1:02d}", speaker_sessions
     
     # === Nếu giống speaker cũ bằng verification model ===
     # convert to tensor shape (batch, time)
@@ -224,20 +258,23 @@ def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=Fal
         print(f"  Max score: {max_score:.3f}, max_prediction: {max_prediction}")
 
     if max_prediction:
+        registered_speakers_emb_list[idx].append(emb_norm)
+        registered_speakers_centroid[idx] = compute_centroid(registered_speakers_emb_list[idx])
         return f"spk_{idx+1:02d}", speaker_sessions
     
-
     # === Nếu vượt quá số speaker cho phép → gán speaker gần nhất
     if max_speakers is not None and len(registered_speakers_wav) >= max_speakers:
-        # Update speaker embedding với exponential moving average để ổn định hơn
-        registered_speakers_wav[idx] = audio_f32.copy()
-        registered_speakers_emb[idx] = (1 - update_alpha) * registered_speakers_emb[idx] + update_alpha * emb_norm
-        speaker_counts[idx] += 1
+        # # Update speaker embedding với exponential moving average để ổn định hơn
+        # registered_speakers_wav[idx] = audio_f32.copy()
+        # registered_speakers_emb_ema[idx] = (1 - update_alpha) * registered_speakers_emb_ema[idx] + update_alpha * emb_norm
+        # speaker_counts[idx] += 1
         return f"spk_{idx+1:02d}", speaker_sessions
 
     # === Ngược lại → tạo speaker mới ===
     registered_speakers_wav.append(audio_f32.copy())
-    registered_speakers_emb.append(emb_norm)
+    registered_speakers_emb_ema.append(emb_norm)
+    registered_speakers_emb_list.append([emb_norm])
+    registered_speakers_centroid.append(emb_norm)
     speaker_counts.append(1)
     return f"spk_{len(registered_speakers_wav):02d}", speaker_sessions
 
@@ -279,43 +316,6 @@ def pcm16_to_float32(pcm16: bytes) -> np.ndarray:
     audio_i16 = np.frombuffer(pcm16, dtype=np.int16)
     audio_f32 = audio_i16.astype(np.float32) / 32768.0
     return audio_f32
-
-def file_to_audio_data_url(file_path: str):
-    """
-    Convert a local audio file (e.g., .wav, .mp3, .ogg) to a base64 data URL.
-    """
-    with open(file_path, "rb") as audio_file:
-        encoded_string = base64.b64encode(audio_file.read()).decode("utf-8")
-
-    _, extension = os.path.splitext(file_path)
-    extension = extension[1:].lower()  # bỏ dấu chấm
-    mime_type = f"audio/{'mpeg' if extension == 'mp3' else extension}"
-
-    return f"data:{mime_type};base64,{encoded_string}"
-
-def ndarray_audio_to_data_url(audio: np.ndarray, sampling_rate: int = 16000):
-    """
-    Convert a ndarray audio to a WAV base64 data URL (in-memory).
-    """
-
-    # Ghi WAV vào memory buffer
-    buffer = io.BytesIO()
-    sf.write(buffer, audio, samplerate=sampling_rate, format="WAV")
-    buffer.seek(0)
-
-    # Encode
-    encoded = base64.b64encode(buffer.read()).decode("utf-8")
-    mime_type = "audio/wav"
-
-    return f"data:{mime_type};base64,{encoded}"
-
-def get_payload(audio_url: str):
-    payload = PAYLOAD_TEMPLATE.copy()
-    payload["messages"][0]["content"][0]["audio_url"]["url"] = audio_url
-    return payload
-
-def get_transcript(result: dict):
-    return result["choices"][0]["message"]["content"].strip()
 
 async def transcribe_file(
     file_path: str,
@@ -377,20 +377,15 @@ async def transcribe_file(
                 print("speaker_id: ", speaker_id)
                 print("--------------------------------")
 
-            audio_data_url = ndarray_audio_to_data_url(audio_idx)
-            payload = get_payload(audio_data_url)
-            response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=60)
-            result = response.json()
-            chunk_line = get_transcript(result)
-            print("chunk_line: ", chunk_line)
-            
+            chunk_line = get_transcript(audio_idx)
             if chunk_line:
+                if chunk_line == "no speech":
+                    continue
                 lines.append(chunk_line)
                 if speaker_id:
                     formatted_lines.append(f"{speaker_id}: {chunk_line}")
                 else:
                     formatted_lines.append(chunk_line)
-
         # synthesize segments dựa trên tổng thời lượng media
         if lines:
             total_chars = sum(len(line) for line in lines)
@@ -415,7 +410,7 @@ async def transcribe_file(
         # TODO: detect language
         language_detected = lang_hint
         language_probability = 1.0
-
+        
         # Cleanup: xóa session sau khi hoàn thành để tránh memory leak
         if file_session_id in speaker_sessions:
             del speaker_sessions[file_session_id]
@@ -583,36 +578,34 @@ async def run_transcribe_on_full_buffer(
             )
             print("speaker_id (full): ", speaker_id)
 
-        audio_data_url = ndarray_audio_to_data_url(audio_f32)
-        payload = get_payload(audio_data_url)
-        response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=60)
-        result = response.json()
-        chunk_line = get_transcript(result)
+        chunk_line = get_transcript(audio_f32)
         print("chunk_line: ", chunk_line)
+        if chunk_line and chunk_line != "no speech":
+            segments_list = []
+            # Ước tính timestamp từ buffer size
+            buffer_duration = len(audio_buffer) / 2 / 16000
+            segment_entry = {
+                "start": round(time_offset, 2),
+                "end": round(time_offset + buffer_duration, 2),
+                "text": chunk_line,
+            }
+            if speaker_id:
+                segment_entry["speaker_id"] = speaker_id
+            segments_list.append(segment_entry)
 
-        segments_list = []
-        # Ước tính timestamp từ buffer size
-        buffer_duration = len(audio_buffer) / 2 / 16000
-        segment_entry = {
-            "start": round(time_offset, 2),
-            "end": round(time_offset + buffer_duration, 2),
-            "text": chunk_line,
-        }
-        if speaker_id:
-            segment_entry["speaker_id"] = speaker_id
-        segments_list.append(segment_entry)
+            # TODO: detect language
+            language_detected = lang_hint
+            language_probability = 1.0
 
-        # TODO: detect language
-        language_detected = lang_hint
-        language_probability = 1.0
-
-        return {
-            "speaker_id": speaker_id,
-            "language": language_detected,
-            "language_probability": round(language_probability, 3),
-            "text": chunk_line,
-            "segments": segments_list,
-        }
+            return {
+                "speaker_id": speaker_id,
+                "language": language_detected,
+                "language_probability": round(language_probability, 3),
+                "text": chunk_line,
+                "segments": segments_list,
+            }
+        else:
+            return {"text": "", "segments": []}
     except (ValueError, RuntimeError) as e:
         error_msg = str(e).lower()
         if "empty" in error_msg or "max()" in error_msg or "sequence" in error_msg:

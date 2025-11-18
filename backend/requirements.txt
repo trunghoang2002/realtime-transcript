@@ -7,4 +7,5 @@ onnxruntime-gpu==1.23.2
 requests==2.32.5
 jiwer==4.0.0
 # modal==1.2.2 # for hosting on modal
+# openai==2.8.1 # for using openai api
 git+https://github.com/speechbrain/speechbrain.git@develop

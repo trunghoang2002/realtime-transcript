@@ -82,6 +82,7 @@ model = AutoModel(
 # Patch SpeechBrain compatibility issue với huggingface_hub
 import fix_speechbrain  # Phải import TRƯỚC speechbrain
 from speechbrain.inference import EncoderClassifier
+from speechbrain.inference.speaker import SpeakerRecognition
 import torch
 
 # Load speaker embedding model
@@ -90,10 +91,16 @@ spk_model = EncoderClassifier.from_hparams(
     run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
 )
 
+# Load speaker verification model
+verification_model = SpeakerRecognition.from_hparams(
+    source="speechbrain/spkrec-ecapa-voxceleb",
+    run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+)
+
 # Quản lý state của speaker cho mỗi session (tránh xung đột giữa các user)
 # Key: session_id (str), Value: dict với 'registered_speakers' và 'speaker_counts'
 speaker_sessions: dict[str, dict] = {}
-speaker_threshold = 0.6  # cosine similarity ngưỡng nhận cùng người nói
+speaker_threshold = 0.5  # cosine similarity ngưỡng nhận cùng người nói
 update_alpha = 0.3  # hệ số cho exponential moving average khi update embedding
 min_audio_length = 8000  # minimum 0.5 giây (16kHz) - chỉ pad khi quá ngắn
 
@@ -143,21 +150,24 @@ def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=Fal
     # Lấy hoặc tạo state cho session này
     if session_id not in speaker_sessions:
         speaker_sessions[session_id] = {
-            "registered_speakers": [],
+            "registered_speakers_wav": [],
+            "registered_speakers_emb": [],
             "speaker_counts": []
         }
     
-    registered_speakers = speaker_sessions[session_id]["registered_speakers"]
+    registered_speakers_wav = speaker_sessions[session_id]["registered_speakers_wav"]
+    registered_speakers_emb = speaker_sessions[session_id]["registered_speakers_emb"]
     speaker_counts = speaker_sessions[session_id]["speaker_counts"]
 
     # Nếu chưa có người nói nào, tạo mới
-    if not registered_speakers:
-        registered_speakers.append(emb_norm)
+    if not registered_speakers_wav:
+        registered_speakers_wav.append(audio_f32)
+        registered_speakers_emb.append(emb_norm)
         speaker_counts.append(1)
         return "spk_01", speaker_sessions
 
     # So khớp cosine với danh sách speaker đã biết (đã normalize nên chỉ cần dot product)
-    sims = [np.dot(emb_norm, s) for s in registered_speakers]
+    sims = [np.dot(emb_norm, s) for s in registered_speakers_emb]
     max_sim = max(sims)
     idx = np.argmax(sims)
     
@@ -165,7 +175,7 @@ def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=Fal
         print(f"  Similarities: {[f'{s:.3f}' for s in sims]}, max={max_sim:.3f}")
 
     # === Nếu mới chỉ có 1 speaker duy nhất và speaker_count = 1 thì giảm ngưỡng ===
-    if len(registered_speakers) == 1 and speaker_counts[0] == 1:
+    if len(registered_speakers_wav) == 1 and speaker_counts[0] == 1:
         speaker_threshold = 0.3
     else:
         speaker_threshold = 0.5
@@ -173,21 +183,43 @@ def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", debug=Fal
     # === Nếu giống speaker cũ ===
     if max_sim > speaker_threshold:
         # Update speaker embedding với exponential moving average để ổn định hơn
-        registered_speakers[idx] = (1 - update_alpha) * registered_speakers[idx] + update_alpha * emb_norm
+        registered_speakers_wav[idx] = audio_f32.copy()
+        registered_speakers_emb[idx] = (1 - update_alpha) * registered_speakers_emb[idx] + update_alpha * emb_norm
         speaker_counts[idx] += 1
         return f"spk_{idx+1:02d}", speaker_sessions
     
+    # === Nếu giống speaker cũ bằng verification model ===
+    # convert to tensor shape (batch, time)
+    emb_input = torch.tensor(audio_f32).unsqueeze(0)
+    max_score = 0.0
+    max_prediction = False
+    for i in range(len(registered_speakers_wav)):
+        score, prediction = verification_model.verify_batch(emb_input, torch.tensor(registered_speakers_wav[i]).unsqueeze(0))
+        if score.item() > max_score:
+            max_score = score.item()
+            max_prediction = prediction.item()
+            idx = i
+    
+    if debug:
+        print(f"  Max score: {max_score:.3f}, max_prediction: {max_prediction}")
+
+    if max_prediction:
+        return f"spk_{idx+1:02d}", speaker_sessions
+    
+
     # === Nếu vượt quá số speaker cho phép → gán speaker gần nhất
-    if max_speakers is not None and len(registered_speakers) >= max_speakers:
+    if max_speakers is not None and len(registered_speakers_wav) >= max_speakers:
         # Update speaker embedding với exponential moving average để ổn định hơn
-        registered_speakers[idx] = (1 - update_alpha) * registered_speakers[idx] + update_alpha * emb_norm
+        registered_speakers_wav[idx] = audio_f32.copy()
+        registered_speakers_emb[idx] = (1 - update_alpha) * registered_speakers_emb[idx] + update_alpha * emb_norm
         speaker_counts[idx] += 1
         return f"spk_{idx+1:02d}", speaker_sessions
 
     # === Ngược lại → tạo speaker mới ===
-    registered_speakers.append(emb_norm)
+    registered_speakers_wav.append(audio_f32.copy())
+    registered_speakers_emb.append(emb_norm)
     speaker_counts.append(1)
-    return f"spk_{len(registered_speakers):02d}", speaker_sessions
+    return f"spk_{len(registered_speakers_wav):02d}", speaker_sessions
 
 def has_repeated_substring(s: str, min_repeat: int = 5, min_len: int = 1) -> bool:
     """
@@ -829,6 +861,8 @@ async def ws_transcribe(ws: WebSocket):
                             # Vẫn reset full_buffer để tránh tích lũy quá nhiều
                             full_buffer = bytearray()
                             full_buffer_start_time = 0.0
+                    else:
+                        end_speech = False
                 else:
                     # Lưu buffer vào full_buffer (chỉ khi không phải silence)
                     full_buffer.extend(current_buffer_bytes)
