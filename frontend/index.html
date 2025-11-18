@@ -340,9 +340,10 @@
     const maxSpeakersInput = document.getElementById("maxSpeakersInput");
 
     // Buffer để gom dữ liệu trước khi resample
-    // Gửi frame cỡ 40ms để latency thấp (~640 samples @ 16kHz -> 1280 bytes)
+    // Gửi frame cỡ 85ms để latency thấp (~1360 samples @ 16kHz -> 1360 * 2 = 2720 bytes)
     const TARGET_SR = 16000;
-    const FRAME_MS = 40;
+    const FRAME_MS = 85;
+    const GAIN = 1.2;
 
     let inputSampleRate = 48000;
     let leftover = new Float32Array(0);
@@ -396,6 +397,14 @@
       return out;
     }
 
+    function applyGain(float32, gain) {
+      const out = new Float32Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        out[i] = float32[i] * gain;
+      }
+      return out;
+    }
+
     function handleAudioProcess(e) {
       if (!running) return;
       const input = e.inputBuffer.getChannelData(0); // mono
@@ -404,8 +413,10 @@
       merged.set(leftover, 0);
       merged.set(input, leftover.length);
 
+      const boosted = applyGain(merged, GAIN);
+
       // Downsample về 16k
-      const ds = downsampleFloat32To16kHz(merged, inputSampleRate);
+      const ds = downsampleFloat32To16kHz(boosted, inputSampleRate);
       levelMeter(ds);
 
       // Tính số samples cho một frame gửi
@@ -590,7 +601,7 @@
       };
 
       // Lấy micro
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       micStream = stream;
 
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();

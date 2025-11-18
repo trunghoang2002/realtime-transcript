@@ -2,7 +2,7 @@
 # Script để activate CUDA và cuDNN cho realtime-transcript
 
 # Activate conda env (thay v2t bằng env name của bạn nếu khác)
-source ~/activate_cuda_env.sh
+source ~/activate_cuda121.sh
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate v2t
 
