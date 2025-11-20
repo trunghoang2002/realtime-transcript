@@ -2,9 +2,13 @@
 
 Ứng dụng web chuyển đổi giọng nói thành văn bản (Speech-to-Text) theo thời gian thực và từ file audio/video.
 
-- Hỗ trợ 2 backend model:
-  - Whisper (qua `faster-whisper`) — mặc định, tối ưu realtime
-  - SenseVoice (qua `funasr`) — thay thế, có fallback timestamp cho file upload
+- Hỗ trợ nhiều backend model:
+  - **Whisper** (qua `faster-whisper`) — mặc định, tối ưu realtime, mã nguồn mở
+  - **SenseVoice** (qua `funasr`) — thay thế Whisper, có fallback timestamp
+  - **Gemini** (qua Gemini API) — Google Gemini 2.5 Flash/Pro, chính xác cao
+  - **Qwen Audio** (qua Modal/vLLM) — Alibaba Qwen2-Audio-7B, hỗ trợ nhiều ngôn ngữ
+  - **Qwen Omni** (qua API) — Qwen3-Omni-30B, multimodal audio understanding
+  - **Hybrid** - Kết hợp Whisper (realtime) + Qwen Omni (full transcription)
 
 ## ✨ Tính năng
 
@@ -13,7 +17,14 @@
   - **Full messages**: Transcript chính xác hơn từ toàn bộ đoạn speech khi phát hiện kết thúc (độ chính xác cao)
 - **Smart Buffer Management**: Tự động tích lũy audio và transcribe lại với cấu hình tốt hơn khi phát hiện kết thúc đoạn speech
 - **File Upload**: Upload và transcribe file audio/video (mp3, wav, m4a, mp4, avi, mov, ...), trả về full transcript và danh sách segments có timestamp
-- **Speaker Detection (Nhận diện người nói)**: Tùy chọn nhận diện và phân biệt nhiều người nói trong audio, hỗ trợ cấu hình số lượng người nói tối đa (mặc định: 2)
+- **Speaker Detection (Nhận diện người nói)**: Tùy chọn nhận diện và phân biệt nhiều người nói trong audio
+  - **Whisper-based:**
+    - **main_v3.py** (khuyến nghị ⭐): 2-tier matching (EMA + cluster centroid), persistent memory
+    - **main_v2.py**: Bootstrap clustering với K-means, tự động phân cụm
+    - **main.py**: Chỉ hỗ trợ trong file upload
+  - **API-based:** 3-tier matching (EMA → centroid → verification model) cho độ chính xác cao
+  - Hỗ trợ cấu hình số lượng người nói tối đa (mặc định: 2)
+  - Speaker ID format: `spk_01`, `spk_02` (Whisper) hoặc `SPEAKER_00`, `SPEAKER_01` (v3)
 - **Đa ngôn ngữ**: Hỗ trợ nhiều ngôn ngữ với tự động phát hiện ngôn ngữ
 - **Timestamps**: Realtime có timestamp theo buffer; Upload có timestamp từ model hoặc được suy đoán (fallback) theo độ dài nội dung
 - **RTF (Real-Time Factor)**: Tính toán và hiển thị RTF cho file upload để đánh giá hiệu suất xử lý
@@ -23,12 +34,90 @@
 - **Drag & Drop**: Kéo thả file để upload dễ dàng
 - **Progress Tracking**: Theo dõi tiến trình upload và xử lý
 
+## 📊 So sánh các Versions
+
+### Whisper-based Versions (Mã nguồn mở, tối ưu realtime)
+
+| Feature | main.py | main_v2.py | main_v3.py ⭐ | main_sensevoice.py |
+|---------|---------|------------|--------------|-------------------|
+| **Model** | Whisper | Whisper | Whisper | SenseVoice |
+| **Realtime Transcription** | ✅ | ✅ | ✅ | ✅ |
+| **File Upload** | ✅ | ✅ | ✅ | ✅ |
+| **Speaker Detection (Realtime)** | ❌ | ✅ Bootstrap | ✅ 2-tier | ❌ |
+| **Speaker Detection (File)** | ✅ | ✅ | ✅ | ✅ |
+| **Độ phức tạp** | Đơn giản | Phức tạp | Trung bình | Đơn giản |
+| **Hiệu suất** | Tốt | Tốt | Tốt nhất | Tốt |
+| **Bootstrap Phase** | - | ~1 phút | Không cần | - |
+| **Speaker Tracking** | File only | Persistent | Persistent | File only |
+| **Chi phí** | Miễn phí | Miễn phí | Miễn phí | Miễn phí |
+| **Khuyến nghị** | Testing | Tự động phân cụm | **Sử dụng chính** | Thay thế Whisper |
+
+### API-based Versions (Chính xác cao, yêu cầu API key/server)
+
+| Feature | main_gemini.py | main_qwenaudio.py | main_qwenomni.py | main_whispersmall_qwenomni.py |
+|---------|----------------|-------------------|------------------|-------------------------------|
+| **Model** | Gemini 2.5 | Qwen2-Audio-7B | Qwen3-Omni-30B | Whisper + Qwen Omni |
+| **Provider** | Google API | Modal/vLLM | Custom API | Local + API |
+| **Realtime Transcription** | ✅ Whisper | ✅ Whisper | ✅ Whisper | ✅ Whisper |
+| **Full Transcription** | ✅ Gemini | ✅ Qwen Audio | ✅ Qwen Omni | ✅ Qwen Omni |
+| **Speaker Detection** | ✅ | ✅ | ✅ | ✅ |
+| **Độ chính xác** | Rất cao | Cao | Rất cao | Rất cao |
+| **Latency** | Cao | Trung bình | Trung bình | Trung bình |
+| **Chi phí** | Có phí | Có phí | Có phí | Có phí |
+| **Đa ngôn ngữ** | ✅✅✅ | ✅✅ | ✅✅✅ | ✅✅✅ |
+| **Khuyến nghị** | Chính xác nhất | Self-hosted | API endpoint | Hybrid tốt |
+
+**Chọn version nào?**
+
+**Mã nguồn mở (Miễn phí):**
+- 🏁 **Mới bắt đầu**: `main.py` - Đơn giản, dễ hiểu
+- ⭐ **Sử dụng chính**: `main_v3.py` - Tối ưu, speaker detection tốt nhất
+- 🔬 **Nghiên cứu**: `main_v2.py` - Bootstrap clustering, tự động phân cụm
+- 🔄 **Thay thế**: `main_sensevoice.py` - Model SenseVoice
+
+**API-based (Chính xác cao, có phí):**
+- 🌟 **Chính xác nhất**: `main_gemini.py` - Google Gemini, hỗ trợ đa ngôn ngữ tốt nhất
+- 🏢 **Self-hosted**: `main_qwenaudio.py` - Deploy trên Modal/vLLM, kiểm soát data
+- 🔌 **API endpoint**: `main_qwenomni.py` - Qwen3-Omni qua API
+- ⚡ **Hybrid**: `main_whispersmall_qwenomni.py` - Kết hợp tốc độ + chính xác
+
+### 💰 So sánh Chi phí & Performance
+
+| Version | Chi phí | Latency | Chính xác | GPU Required | Use Case |
+|---------|---------|---------|-----------|--------------|----------|
+| **main_v3.py** | Miễn phí | Thấp (~100ms) | Tốt | Optional | Production miễn phí ⭐ |
+| **main_gemini.py** | ~$0.01/min | Cao (~1-2s) | Rất cao | No | Chất lượng cao nhất ⭐ |
+| **main_qwenaudio.py** | ~$0.5-1/hour | Trung bình (~500ms) | Cao | Modal GPU | Self-hosted |
+| **main_whispersmall_qwenomni.py** | ~$0.005/min | Thấp+Cao | Rất cao | Optional | Hybrid tối ưu ⭐ |
+
+**Lưu ý về chi phí:**
+- Whisper versions: Hoàn toàn miễn phí, chạy local
+- Gemini: Free tier 15 requests/phút, sau đó có phí
+- Qwen Audio Modal: Tính theo GPU hours (~$0.5-1/hour trên L4/H100)
+- Hybrid: Chi phí thấp hơn vì chỉ call API cho full transcription
+
+**Performance Tips:**
+- **Độ trễ thấp**: Dùng Whisper-based versions (main_v3.py)
+- **Chính xác cao**: Dùng Gemini hoặc Hybrid versions
+- **Cân bằng**: Dùng Hybrid version (Whisper realtime + API full)
+- **Data privacy**: Dùng Whisper hoặc self-hosted Qwen Audio
+
 ## 🏗️ Kiến trúc
 
 - **Backend**: FastAPI (WebSocket cho realtime, REST cho upload)
 - **Frontend**: HTML/JavaScript với WebSocket client
-- **Model**: Whisper (`faster-whisper`) hoặc SenseVoice (`funasr`)
-- **Speaker Diarization**: SpeechBrain ECAPA-TDNN với 2-tier matching (EMA + cluster centroid)
+- **Models**: 
+  - **Mã nguồn mở**: Whisper (`faster-whisper`), SenseVoice (`funasr`)
+  - **API-based**: Google Gemini, Qwen Audio (Modal/vLLM), Qwen Omni
+  - **Hybrid**: Whisper (realtime) + API (full transcription)
+- **Speaker Diarization**: 
+  - SpeechBrain ECAPA-TDNN với 2-tier matching (EMA + cluster centroid)
+  - Bootstrap clustering với K-means (main_v2.py)
+  - 3-tier matching với verification model (API versions)
+- **Infrastructure**:
+  - Local: CUDA 12.1 + cuDNN 9 cho GPU inference
+  - Cloud: Modal platform cho Qwen Audio deployment
+  - API: Google Gemini API, Custom endpoints cho Qwen Omni
 
 ## 📋 Yêu cầu hệ thống
 
@@ -117,12 +206,52 @@ COMPUTE_TYPE = "int8"  # "float16" trên GPU, "int8" hoặc "int8_float16" trên
 - `main_v2.py`: Version với bootstrap clustering speaker detection
 - `main_v3.py`: Version với RealtimeSpeakerDiarization class (khuyến nghị - đơn giản và hiệu quả)
 
+### 5. Cấu hình API-based versions (tùy chọn)
+
+**Gemini API:**
+```bash
+# Tạo .env file trong thư mục backend
+echo "GEMINI_API_KEY=your_api_key_here" > backend/.env
+```
+- Lấy API key từ: https://aistudio.google.com/apikey
+- File sử dụng: `main_gemini.py`, `main_v2_gemini.py`
+
+**Qwen Audio (Modal):**
+```bash
+# Deploy lên Modal
+cd backend
+modal deploy qwen_audio_modal.py
+
+# Cập nhật API_URL trong main_qwenaudio.py
+API_URL = "https://your-modal-url/v1/chat/completions"
+```
+- Yêu cầu: Modal account và API token
+- Chi phí: Theo GPU usage trên Modal platform
+
+**Qwen Omni API:**
+```bash
+# Cập nhật API_URL trong main_qwenomni.py hoặc main_whispersmall_qwenomni.py
+API_URL = "https://your-qwen-endpoint/v1/chat/completions"
+```
+- Yêu cầu: Custom API endpoint hoặc ngrok tunnel
+- File sử dụng: `main_qwenomni.py`, `main_whispersmall_qwenomni.py`
+
+**Lưu ý:**
+- API-based versions có chi phí sử dụng
+- Gemini: Miễn phí tier có giới hạn requests/day
+- Qwen Audio: Chi phí GPU trên Modal (~$0.5-1/hour)
+- Qwen Omni: Tùy thuộc vào hosting solution
+
 ## ▶️ Chạy ứng dụng
 
-### Khởi động server
+### Khởi động server (CPU)
 ```bash
 cd backend
-python main.py
+python main.py          # Version cơ bản
+# hoặc
+python main_v2.py       # Version với bootstrap speaker detection
+# hoặc
+python main_v3.py       # Version với RealtimeSpeakerDiarization (khuyến nghị)
 ```
 
 Server sẽ chạy tại: `http://localhost:8917`
@@ -134,18 +263,36 @@ Server sẽ chạy tại: `http://localhost:8917`
 - File `~/activate_cuda121.sh` để activate CUDA 12.1
 - Conda environment `v2t` đã được tạo và có các dependencies
 
-**Chạy server:**
+**Chạy server (Whisper-based):**
 ```bash
-cd backend
-./run_main_with_cuda.sh          # Whisper (port 8917)
-# hoặc
+cd backend/scripts
+
+# Whisper versions (miễn phí, mã nguồn mở)
+./run_main_with_cuda.sh          # main.py - Whisper cơ bản (port 8917)
+./run_main_v2_with_cuda.sh       # main_v2.py - Bootstrap speaker detection (port 8917)
+./run_main_v3_with_cuda.sh       # main_v3.py - RealtimeSpeakerDiarization (port 8917, khuyến nghị ⭐)
 ./run_main_sensevoice_with_cuda.sh  # SenseVoice (port 8918)
+```
+
+**Chạy server (API-based):**
+```bash
+cd backend/scripts
+
+# API-based versions (chính xác cao, có phí)
+./run_main_gemini_with_cuda.sh              # Gemini 2.5 (khuyến nghị cho chính xác ⭐)
+./run_main_v2_gemini_with_cuda.sh           # Gemini + Bootstrap clustering
+./run_main_qwenaudio_with_cuda.sh           # Qwen Audio (self-hosted)
+./run_main_qwenomni_with_cuda.sh            # Qwen Omni (API endpoint)
+./run_main_whispersmall_qwenomni_with_cuda.sh  # Hybrid: Whisper + Qwen (khuyến nghị cho hybrid ⭐)
 ```
 
 **Với auto-reload (development):**
 ```bash
-./run_main_with_cuda.sh --reload          # Whisper
-./run_main_sensevoice_with_cuda.sh --reload  # SenseVoice
+# Thêm --reload flag vào bất kỳ script nào
+./run_main_with_cuda.sh --reload
+./run_main_v3_with_cuda.sh --reload
+./run_main_gemini_with_cuda.sh --reload
+./run_main_whispersmall_qwenomni_with_cuda.sh --reload
 ```
 
 **Lưu ý:**
@@ -154,11 +301,23 @@ cd backend
   - Setup CUDA paths và cuDNN libraries từ conda env
   - Cấu hình `LD_LIBRARY_PATH` cho cuDNN và PyTorch libraries
   - Sử dụng GPU device 1 (`CUDA_VISIBLE_DEVICES=1`)
-- Whisper chạy trên port **8917**, SenseVoice chạy trên port **8918**
+- **Ports:**
+  - Whisper versions: port **8917**
+  - SenseVoice: port **8918**
+  - Tất cả API-based versions: port **8917**
+- **Khuyến nghị:**
+  - **Miễn phí**: `main_v3.py` - Whisper với RealtimeSpeakerDiarization ⭐
+  - **Chính xác cao**: `main_gemini.py` - Google Gemini API ⭐
+  - **Hybrid**: `main_whispersmall_qwenomni.py` - Cân bằng tốc độ & chính xác ⭐
+- **API-based versions yêu cầu:**
+  - Gemini: `GEMINI_API_KEY` trong `.env` file
+  - Qwen Audio: Modal deployment hoặc local vLLM server
+  - Qwen Omni: Custom API endpoint
 - Nếu gặp lỗi, kiểm tra:
   - Conda env `v2t` đã được tạo chưa
   - File `~/activate_cuda121.sh` có tồn tại không
   - CUDA 12.1 đã được cài đặt đúng chưa
+  - API keys/endpoints đã được cấu hình chưa (cho API versions)
 
 ### Truy cập ứng dụng
 Mở trình duyệt và truy cập: `http://localhost:8917`
@@ -268,31 +427,48 @@ curl -X POST http://localhost:8917/api/transcribe \
 ```
 realtime-transcript/
 ├── backend/
-│   ├── main.py                          # FastAPI server với Whisper model
+│   ├── main.py                          # FastAPI server với Whisper model (version cơ bản)
+│   ├── main_v2.py                       # FastAPI server với Whisper + bootstrap speaker detection
+│   ├── main_v3.py                       # FastAPI server với Whisper + RealtimeSpeakerDiarization (khuyến nghị)
 │   ├── main_sensevoice.py               # FastAPI server với SenseVoice model
+│   ├── main_gemini.py                   # FastAPI server với Gemini model
+│   ├── main_qwenaudio.py                # FastAPI server với Qwen Audio
+│   ├── main_qwenomni.py                 # FastAPI server với Qwen Omni
+│   ├── main_whispersmall_qwenomni.py    # FastAPI server với Whisper Small + Qwen Omni
+│   │
 │   ├── requirements.txt                 # Python dependencies
 │   ├── constraints.txt                  # Version constraints cho dependencies
 │   │
-│   ├── run_main_with_cuda.sh            # Script chạy Whisper với CUDA support
-│   ├── run_main_sensevoice_with_cuda.sh # Script chạy SenseVoice với CUDA support
-│   ├── activate_cuda_env.sh             # Script activate CUDA environment
+│   ├── scripts/                         # Scripts để chạy server với CUDA
+│   │   ├── activate_cuda_env.sh         # Script activate CUDA environment
+│   │   ├── run_main_with_cuda.sh        # Chạy main.py với CUDA
+│   │   ├── run_main_v2_with_cuda.sh     # Chạy main_v2.py với CUDA
+│   │   ├── run_main_v3_with_cuda.sh     # Chạy main_v3.py với CUDA (khuyến nghị)
+│   │   ├── run_main_sensevoice_with_cuda.sh  # Chạy SenseVoice với CUDA
+│   │   ├── run_main_gemini_with_cuda.sh      # Chạy Gemini với CUDA
+│   │   └── ...                          # Các scripts khác
+│   │
+│   ├── docs/                            # Tài liệu
+│   │   ├── whisper_docs.md              # Tài liệu về Whisper model
+│   │   ├── sensevoice_docs.md           # Tài liệu về SenseVoice model
+│   │   └── whisper_vs_sensevoice.md     # So sánh Whisper vs SenseVoice
 │   │
 │   ├── get_audio.py                     # Utilities để decode audio/video files
 │   ├── silero_vad.py                    # VAD (Voice Activity Detection) sử dụng Silero VAD
 │   ├── fix_speechbrain.py               # Patch compatibility cho SpeechBrain với huggingface_hub
+│   ├── speechbrain_diarization.py       # RealtimeSpeakerDiarization class (2-tier matching)
+│   ├── qwen_audio_modal.py              # Qwen Audio model integration
 │   │
 │   ├── check_cuda.py                    # Script kiểm tra CUDA availability
-│   │
-│   ├── whisper_docs.md                  # Tài liệu về Whisper model
-│   ├── sensevoice_docs.md               # Tài liệu về SenseVoice model
-│   ├── whisper_vs_sensevoice.md         # So sánh Whisper vs SenseVoice
+│   ├── test.py                          # Script test
+│   ├── test_call_qwen_audio.py          # Test Qwen Audio
 │   │
 │   ├── eval/                            # Thư mục evaluation/testing
 │   │   ├── eval.py                      # Script đánh giá model
 │   │   ├── en/                          # Test cases tiếng Anh
 │   │   └── ja/                          # Test cases tiếng Nhật
 │   │
-│   ├── note.txt                         # Ghi chú phát triển
+│   ├── pretrained_models/               # Thư mục chứa pretrained models
 │   └── __pycache__/                     # Python cache (tự động tạo)
 │
 ├── frontend/
@@ -303,31 +479,113 @@ realtime-transcript/
 
 ### Mô tả các thành phần chính
 
-#### Backend Core Files
-- **`main.py`**: Server chính sử dụng Whisper model (`faster-whisper`) cho realtime và file transcription
+#### Backend Core Files (Whisper versions)
+- **`main.py`**: Server cơ bản sử dụng Whisper model (`faster-whisper`)
   - Realtime: Dual-buffer strategy với partial và full messages
   - File upload: Transcribe với cấu hình tối ưu cho độ chính xác
-- **`main_sensevoice.py`**: Server thay thế sử dụng SenseVoice model (`funasr`) với khả năng fallback timestamp tốt hơn
+  - Speaker detection: Không hỗ trợ trong realtime (chỉ file upload)
+
+- **`main_v2.py`**: Server với bootstrap clustering speaker detection
+  - Realtime: Dual-buffer strategy + bootstrap clustering
+  - Speaker detection: Bootstrap phase thu thập embeddings → K-means clustering → nhận diện speaker
+  - Phức tạp hơn nhưng có khả năng tự động phân cụm speakers
+
+- **`main_v3.py`**: Server với RealtimeSpeakerDiarization (KHUYẾN NGHỊ ⭐)
+  - Realtime: Dual-buffer strategy + RealtimeSpeakerDiarization
+  - Speaker detection: 2-tier matching (EMA embedding + cluster centroid)
+  - Đơn giản, hiệu quả, persistent speaker memory
+  - Preload model một lần, tái sử dụng cho tất cả sessions
+
+- **`main_sensevoice.py`**: Server sử dụng SenseVoice model (`funasr`)
   - Realtime: Tương tự Whisper với dual-buffer strategy
   - File upload: Hỗ trợ multi-language detection và fallback timestamp synthesis
+
+#### Backend Core Files (API-based versions)
+
+- **`main_gemini.py`**: Server sử dụng Google Gemini 2.5 API
+  - Realtime: Whisper (partial) → Gemini API (full transcription)
+  - File upload: Gemini API cho toàn bộ file
+  - Speaker detection: 3-tier matching (EMA → centroid → verification model)
+  - Ưu điểm: Chính xác rất cao, hỗ trợ đa ngôn ngữ tốt nhất
+  - Yêu cầu: `GEMINI_API_KEY` environment variable
+
+- **`main_qwenaudio.py`**: Server sử dụng Qwen2-Audio-7B qua Modal/vLLM
+  - Realtime: Whisper (partial) → Qwen Audio API (full)
+  - File upload: Qwen Audio API
+  - Speaker detection: 2-tier matching (EMA + verification)
+  - Ưu điểm: Self-hosted, kiểm soát data, chính xác cao
+  - Yêu cầu: Modal deployment hoặc local vLLM server
+
+- **`main_qwenomni.py`**: Server sử dụng Qwen3-Omni-30B API
+  - Realtime: Whisper (partial) → Qwen Omni API (full)
+  - File upload: Qwen Omni API
+  - Speaker detection: 2-tier matching
+  - Ưu điểm: Multimodal, chính xác cao, hỗ trợ nhiều ngôn ngữ
+  - Yêu cầu: Custom API endpoint
+
+- **`main_whispersmall_qwenomni.py`**: Hybrid version (KHUYẾN NGHỊ cho API ⭐)
+  - Realtime: Whisper Small (nhanh, độ trễ thấp)
+  - Full transcription: Qwen Omni API (chính xác cao)
+  - Speaker detection: 2-tier matching
+  - Ưu điểm: Cân bằng tốc độ và chính xác, tốt nhất cho production
+  - Yêu cầu: Local Whisper + Qwen API endpoint
+
+- **`main_v2_gemini.py`**: Version kết hợp bootstrap speaker detection + Gemini
+  - Tương tự main_v2.py nhưng sử dụng Gemini cho transcription
+  - Bootstrap clustering cho speaker detection
+  - Chính xác rất cao cho cả transcript và speaker
+
+#### Speaker Diarization Module
+- **`speechbrain_diarization.py`**: RealtimeSpeakerDiarization class
+  - 2-tier matching: EMA embedding (fast) + cluster centroid (robust)
+  - Persistent speaker memory với exponential moving average
+  - Max speakers constraint với force-assignment
+  - Context reset cho conversations mới
+  - Preloaded model support để tối ưu hiệu suất
 
 #### Utility Modules
 - **`get_audio.py`**: Xử lý decode audio/video files thành numpy array (16kHz mono) sử dụng `av` (PyAV)
 - **`silero_vad.py`**: Voice Activity Detection để phát hiện các đoạn có giọng nói, loại bỏ im lặng
 - **`fix_speechbrain.py`**: Patch để fix compatibility issue giữa SpeechBrain và huggingface_hub (cần cho speaker detection)
+- **`qwen_audio_modal.py`**: Modal deployment script cho Qwen2-Audio-7B
+  - Tự động deploy Qwen Audio model lên Modal platform
+  - Sử dụng vLLM inference engine (GPU L4/H100)
+  - Auto-scaling với scaledown window 15 phút
+  - OpenAI-compatible API endpoint
+  - Hỗ trợ audio streaming và batch processing
 
-#### CUDA Scripts
-- **`run_main_with_cuda.sh`**: Script tự động setup CUDA/cuDNN và chạy Whisper server trên port 8917
-- **`run_main_sensevoice_with_cuda.sh`**: Script tự động setup CUDA/cuDNN và chạy SenseVoice server trên port 8918
+#### CUDA Scripts (trong `scripts/`)
+
+**Whisper-based:**
+- **`run_main_with_cuda.sh`**: Script tự động setup CUDA/cuDNN và chạy main.py trên port 8917
+- **`run_main_v2_with_cuda.sh`**: Script chạy main_v2.py (bootstrap speaker detection)
+- **`run_main_v3_with_cuda.sh`**: Script chạy main_v3.py (RealtimeSpeakerDiarization, khuyến nghị ⭐)
+- **`run_main_sensevoice_with_cuda.sh`**: Script chạy SenseVoice server trên port 8918
+
+**API-based:**
+- **`run_main_gemini_with_cuda.sh`**: Script chạy main_gemini.py (Gemini API)
+- **`run_main_v2_gemini_with_cuda.sh`**: Script chạy main_v2_gemini.py (Bootstrap + Gemini)
+- **`run_main_qwenaudio_with_cuda.sh`**: Script chạy main_qwenaudio.py (Qwen Audio)
+- **`run_main_qwenomni_with_cuda.sh`**: Script chạy main_qwenomni.py (Qwen Omni)
+- **`run_main_whispersmall_qwenomni_with_cuda.sh`**: Script chạy main_whispersmall_qwenomni.py (Hybrid, khuyến nghị ⭐)
+
+**Helper scripts:**
 - **`activate_cuda_env.sh`**: Script helper để activate CUDA environment
 - **`check_cuda.py`**: Script kiểm tra CUDA có sẵn và hoạt động không
 
-#### Documentation
+**Tất cả scripts:**
+- Tự động activate conda environment `v2t`
+- Setup CUDA 12.1 paths và cuDNN libraries
+- Cấu hình `LD_LIBRARY_PATH` cho cuDNN và PyTorch
+- Sử dụng GPU device 1 (`CUDA_VISIBLE_DEVICES=1`)
+- Hỗ trợ `--reload` flag cho development mode
+
+#### Documentation (trong `docs/`)
 - **`whisper_docs.md`**: Tài liệu chi tiết về cách sử dụng Whisper model
 - **`sensevoice_docs.md`**: Tài liệu chi tiết về cách sử dụng SenseVoice model
 - **`whisper_vs_sensevoice.md`**: So sánh ưu/nhược điểm giữa 2 models
 
-#### Evaluation
+#### Evaluation (trong `eval/`)
 - **`eval/`**: Thư mục chứa scripts và test cases để đánh giá chất lượng transcription
   - `eval.py`: Script chạy evaluation
   - `en/`, `ja/`: Test cases cho các ngôn ngữ khác nhau
@@ -436,52 +694,161 @@ Trong `transcribe_file()`:
 - **Kiểm tra**: URL WebSocket đúng (ws://localhost:8917/ws)
 
 ### CUDA/cuDNN không tìm thấy (libcudnn_ops.so.*)
-- Dùng script:
-  - Whisper: `backend/run_main_with_cuda.sh`
-  - SenseVoice: `backend/run_main_sensevoice_with_cuda.sh`
+- Dùng script (trong thư mục `backend/scripts/`):
+  - `run_main_with_cuda.sh` - main.py
+  - `run_main_v2_with_cuda.sh` - main_v2.py
+  - `run_main_v3_with_cuda.sh` - main_v3.py (khuyến nghị)
+  - `run_main_sensevoice_with_cuda.sh` - SenseVoice
 - Hoặc tự set:
   ```bash
   export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cudnn/lib:$CONDA_PREFIX/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH"
   ```
 
+### Speaker detection không hoạt động tốt
+- **main_v2.py**: Cần đợi bootstrap phase (~1 phút) để thu thập đủ dữ liệu
+- **main_v3.py** (khuyến nghị): Hoạt động ngay từ đầu, không cần bootstrap
+- Kiểm tra:
+  - `max_speakers` có được set đúng không
+  - Audio có đủ rõ để trích xuất embedding không
+  - Log có hiển thị similarity scores không
+
+### Chọn version nào?
+- **Mới bắt đầu hoặc testing**: `main.py` - Đơn giản nhất
+- **Cần speaker detection trong realtime**: `main_v3.py` ⭐ - Khuyến nghị
+- **Cần tự động phân cụm speakers**: `main_v2.py` - Có bootstrap clustering
+- **Cần chính xác cao nhất**: `main_gemini.py` ⭐ - Google Gemini API
+- **Cần self-hosted API**: `main_qwenaudio.py` - Deploy trên Modal
+- **Cần hybrid tối ưu**: `main_whispersmall_qwenomni.py` ⭐ - Tốc độ + chính xác
+
+### API không hoạt động
+**Gemini API:**
+- Kiểm tra `GEMINI_API_KEY` trong `.env` file
+- Verify API key tại: https://aistudio.google.com/apikey
+- Kiểm tra quota limits (free tier có giới hạn)
+- Log error để xem chi tiết lỗi từ API
+
+**Qwen Audio (Modal):**
+- Verify Modal deployment: `modal app list`
+- Kiểm tra URL trong `API_URL` variable
+- Test endpoint: `curl https://your-modal-url/health`
+- Kiểm tra Modal logs: `modal app logs qwen-audio-modal`
+
+**Qwen Omni:**
+- Kiểm tra API endpoint đang chạy
+- Verify API_URL đúng trong code
+- Test với curl/Postman trước
+- Kiểm tra network/firewall nếu dùng local endpoint
+
+### Modal deployment issues
+```bash
+# Install Modal CLI
+pip install modal
+
+# Login
+modal token set --token-id YOUR_TOKEN_ID --token-secret YOUR_TOKEN_SECRET
+
+# Deploy
+cd backend
+modal deploy qwen_audio_modal.py
+
+# Test
+modal run qwen_audio_modal.py
+
+# Check logs
+modal app logs qwen-audio-modal
+
+# Check status
+modal app list
+```
+
 ## 📝 Ghi chú
 
+### Về Models và Versions
 - Model Whisper/SenseVoice được tải tự động lần đầu chạy
+- SpeechBrain ECAPA-TDNN model được preload một lần (trong main_v3.py) để tối ưu hiệu suất
 - File tạm sẽ tự động xóa sau khi xử lý xong
-- **Realtime transcription sử dụng dual-buffer strategy**:
+- **Khuyến nghị sử dụng `main_v3.py`** - Version tối ưu nhất với RealtimeSpeakerDiarization
+
+### Realtime Transcription
+- **Dual-buffer strategy**:
   - **recv_buffer**: Buffer ~1s để transcribe nhanh và gửi partial messages (độ trễ thấp)
   - **full_buffer**: Tích lũy toàn bộ audio của một đoạn speech, được transcribe lại với cấu hình tốt hơn khi phát hiện kết thúc
   - Kết thúc đoạn speech được phát hiện bằng: silence detection hoặc repeated substring detection
-- Với video files, audio sẽ được extract tự động nếu có ffmpeg
-- **Speaker Detection**: Sử dụng SpeechBrain ECAPA-TDNN model để nhận diện người nói
-  - Speaker ID được gán dạng `spk_01`, `spk_02`, ...
-  - Hệ thống tự động học và cập nhật embedding của từng speaker với exponential moving average
-  - Khi vượt quá `max_speakers`, hệ thống sẽ gán audio mới cho speaker gần nhất
-  - Speaker tracking được reset cho mỗi session (WebSocket connection hoặc file upload)
-- **RTF (Real-Time Factor)**: 
-  - RTF = processing_time / audio_duration
-  - RTF < 1.0: Xử lý nhanh hơn thời gian thực (tốt)
-  - RTF = 1.0: Xử lý bằng thời gian thực
-  - RTF > 1.0: Xử lý chậm hơn thời gian thực
 - **Partial vs Full Messages**:
   - Partial messages: Được gửi liên tục từ buffer ~1s, có độ trễ thấp
   - Full messages: Được gửi khi phát hiện kết thúc đoạn speech, có độ chính xác cao hơn
   - Frontend tự động thay thế phần partial tương ứng bằng full text để cải thiện chất lượng transcript
 - **Repeated Substring Detection**: Hệ thống tự động phát hiện chuỗi lặp lại (≥5 lần) để xác định kết thúc đoạn speech và trigger full transcription
+
+### Speaker Detection
+- **main.py**: Không hỗ trợ speaker detection trong realtime (chỉ file upload)
+- **main_v2.py**: Bootstrap clustering approach
+  - Bootstrap phase: Thu thập embeddings trong ~1 phút đầu
+  - K-means clustering: Phân cụm speakers tự động
+  - 3-tier matching: EMA embedding → cluster centroid → verification model
+  - Phức tạp hơn nhưng có khả năng tự động phân cụm
+- **main_v3.py**: RealtimeSpeakerDiarization (KHUYẾN NGHỊ ⭐)
+  - **2-tier matching**:
+    1. EMA (Exponential Moving Average) embedding - Fast path, similarity threshold
+    2. Cluster centroid - Robust path, sử dụng trung bình của tất cả embeddings
+  - **Persistent speaker memory**: Lưu trữ EMA embedding và cluster của mỗi speaker
+  - **Max speakers constraint**: Force-assign vào speaker có similarity cao nhất khi đạt limit
+  - **Context management**: Reset context cho mỗi session mới, cleanup sau khi kết thúc
+  - **Preloaded model**: Load SpeechBrain ECAPA-TDNN một lần, tái sử dụng cho tất cả sessions
+  - Speaker ID được gán dạng `SPEAKER_00`, `SPEAKER_01`, ...
+- Với video files, audio sẽ được extract tự động nếu có ffmpeg
+
+### Performance Metrics
+- **RTF (Real-Time Factor)**: 
+  - RTF = processing_time / audio_duration
+  - RTF < 1.0: Xử lý nhanh hơn thời gian thực (tốt)
+  - RTF = 1.0: Xử lý bằng thời gian thực
+  - RTF > 1.0: Xử lý chậm hơn thời gian thực
+
+### UI/UX Features
 - Các tùy chọn cấu hình tự động bị disable khi đang xử lý để tránh thay đổi không mong muốn
 - Hệ thống tự động hiển thị/ẩn các phần tử UI dựa trên trạng thái (chỉ hiện transcript khi đang ghi)
 - WebSocket hỗ trợ ping/pong để kiểm tra kết nối
+- Auto-detect WebSocket URL từ port của backend
+
+### Technical Details
+- **Speaker tracking được reset cho mỗi session** (WebSocket connection hoặc file upload)
+- **Session cleanup**: Tự động xóa session data để tránh memory leak
+- **VAD (Voice Activity Detection)**: Sử dụng Silero VAD để lọc silence
+- **Audio format**: PCM16 mono 16kHz cho WebSocket, tự động convert cho file upload
 
 ## 🔧 Dependencies
 
 Xem `backend/requirements.txt` để biết danh sách đầy đủ.
 
-**Chính:**
+**Core Dependencies (Tất cả versions):**
 - `fastapi`: Web framework
 - `uvicorn`: ASGI server
 - `numpy`: Xử lý audio
-- `faster-whisper`: Whisper backend
-- `funasr`: SenseVoice backend
+- `soundfile`: Audio I/O
+- `av` (PyAV): Decode audio/video files
+- `torch`: Deep learning framework
+- `speechbrain`: Speaker diarization (ECAPA-TDNN)
+
+**Whisper-based Versions:**
+- `faster-whisper`: Whisper backend (main.py, main_v2.py, main_v3.py)
+- `funasr`: SenseVoice backend (main_sensevoice.py)
+- `silero-vad`: Voice Activity Detection
+
+**API-based Versions:**
+- `google-genai`: Google Gemini API client (main_gemini.py, main_v2_gemini.py)
+- `requests`: HTTP client (main_qwenaudio.py, main_qwenomni.py, main_whispersmall_qwenomni.py)
+- `python-dotenv`: Environment variables management
+- `aiohttp`: Async HTTP client (optional)
+
+**Modal Deployment:**
+- `modal`: Modal platform SDK (qwen_audio_modal.py)
+- Yêu cầu Modal account và token
+
+**Development:**
+- `pytest`: Testing framework
+- `black`: Code formatter
+- `flake8`: Linter
 
 ## 📄 License
 
