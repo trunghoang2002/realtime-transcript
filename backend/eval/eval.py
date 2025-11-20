@@ -24,7 +24,7 @@ def eval(ground_truth_file, prediction_file):
 
 lang = "ja" # ja | en
 type = "upload" # realtime | upload
-model = "gemini2.5-flash-lite" # sensevoice-small | whisper-small | whisper-medium | qwen2-audio | qwen3-omni | gemini2.5-pro | gemini2.5-flash | gemini2.5-flash-lite
+model = "gemini2.5-pro" # sensevoice-small | whisper-small | whisper-medium | qwen2-audio | qwen3-omni | gemini2.5-pro | gemini2.5-flash | gemini2.5-flash-lite
 
 ground_truth_file = f"{lang}/ground_truth_full.txt"
 prediction_file = f"{lang}/{type}/{model}/predict_full.txt"
