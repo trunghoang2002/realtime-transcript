@@ -28,6 +28,7 @@
 - **Backend**: FastAPI (WebSocket cho realtime, REST cho upload)
 - **Frontend**: HTML/JavaScript với WebSocket client
 - **Model**: Whisper (`faster-whisper`) hoặc SenseVoice (`funasr`)
+- **Speaker Diarization**: SpeechBrain ECAPA-TDNN với 2-tier matching (EMA + cluster centroid)
 
 ## 📋 Yêu cầu hệ thống
 
@@ -79,18 +80,25 @@ venv\Scripts\activate  # Windows
 ### 3. Cài đặt dependencies
 ```bash
 cd backend
+pip install -r constraints.txt
 pip install -r requirements.txt
 ```
 
 **GPU (CUDA)**
 - Khuyến nghị CUDA 12.1 + cuDNN 9
 - Dự án có sẵn script để set môi trường CUDA/cuDNN và chạy server:
-  - Whisper: `backend/run_main_with_cuda.sh`
-  - SenseVoice: `backend/run_main_sensevoice_with_cuda.sh`
+  - `backend/scripts/run_main_with_cuda.sh` - Whisper (main.py)
+  - `backend/scripts/run_main_v2_with_cuda.sh` - Whisper với bootstrap speaker detection (main_v2.py)
+  - `backend/scripts/run_main_v3_with_cuda.sh` - Whisper với RealtimeSpeakerDiarization (main_v3.py)
+  - `backend/scripts/run_main_sensevoice_with_cuda.sh` - SenseVoice
 
 ### 4. Cấu hình model (tùy chọn)
 
-Chỉnh sửa `backend/main.py` (Whisper) hoặc `backend/main_sensevoice.py` (SenseVoice) để thay đổi model và device:
+Chỉnh sửa file tương ứng để thay đổi model và device:
+- `backend/main.py` - Whisper version cơ bản
+- `backend/main_v2.py` - Whisper với bootstrap speaker detection
+- `backend/main_v3.py` - Whisper với RealtimeSpeakerDiarization (khuyến nghị)
+- `backend/main_sensevoice.py` - SenseVoice
 
 ```python
 MODEL_NAME = "small"   # "small" (nhanh), "medium" (chính xác), "large-v3" (nặng)
@@ -103,6 +111,11 @@ COMPUTE_TYPE = "int8"  # "float16" trên GPU, "int8" hoặc "int8_float16" trên
 - Whisper + GPU: `MODEL_NAME = "medium"`, `DEVICE = "cuda"`, `COMPUTE_TYPE = "float16"`
 - SenseVoice + GPU: `DEVICE = "cuda"`
 - SenseVoice + CPU: `DEVICE = "cpu"`
+
+**Chọn version:**
+- `main.py`: Version cơ bản, không có speaker detection trong realtime
+- `main_v2.py`: Version với bootstrap clustering speaker detection
+- `main_v3.py`: Version với RealtimeSpeakerDiarization class (khuyến nghị - đơn giản và hiệu quả)
 
 ## ▶️ Chạy ứng dụng
 

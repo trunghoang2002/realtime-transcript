@@ -556,12 +556,14 @@
           } else if (data.type === "full") {
             // Thay thế phần partial tương ứng bằng full text, giữ lại các full text trước đó
             const fullText = data.text.replace("/newline", "\n");
+            console.log("fullText: ", fullText);
+            console.log("partialStartIndex: ", partialStartIndex);
             const currentFullText = fullTranscriptEl.textContent;
             
             if (partialStartIndex >= 0 && partialStartIndex < currentFullText.length) {
               // Thay thế từ partialStartIndex đến cuối bằng fullText
               const beforePartial = currentFullText.substring(0, partialStartIndex);
-              fullTranscriptEl.textContent = beforePartial + fullText;
+              fullTranscriptEl.textContent = beforePartial + (beforePartial.endsWith("\n") || partialStartIndex === 0 ? "" : "\n") + fullText;
             } else {
               // Fallback: nếu partialStartIndex không hợp lệ, append vào cuối
               if (currentFullText) {
@@ -601,6 +603,7 @@
       };
 
       // Lấy micro
+      // const stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: false }, video: false });
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       micStream = stream;
 

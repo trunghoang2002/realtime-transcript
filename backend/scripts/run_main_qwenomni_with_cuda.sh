@@ -12,7 +12,7 @@ for arg in "$@"; do
   fi
 done
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # Activate conda env và setup CUDA paths
 source ~/activate_cuda121.sh # you need to install cuda 12.1 first, and then activate it
@@ -44,4 +44,4 @@ echo "Starting server with CUDA support..."
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 
 # Chạy server
-CUDA_VISIBLE_DEVICES=1 uvicorn main_whispersmall_qwenomni:app --host 0.0.0.0 --port 8920 $RELOAD_FLAG
+CUDA_VISIBLE_DEVICES=1 uvicorn main_qwenomni:app --host 0.0.0.0 --port 8920 $RELOAD_FLAG
