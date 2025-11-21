@@ -5,6 +5,7 @@ import os
 from typing import List, NamedTuple, Optional
 
 import numpy as np
+import requests
 
 from faster_whisper.utils import get_assets_path
 
@@ -226,6 +227,12 @@ class SpeechTimestampsMap:
 def get_vad_model():
     """Returns the VAD model instance."""
     path = os.path.join(get_assets_path(), "silero_vad.onnx")
+    if not os.path.exists(path):
+        url = "https://github.com/snakers4/silero-vad/raw/refs/heads/master/src/silero_vad/data/silero_vad.onnx"
+        response = requests.get(url)
+        response.raise_for_status()
+        with open(path, "wb") as f:
+            f.write(response.content)
     return SileroVADModel(path)
 
 

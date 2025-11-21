@@ -1,12 +1,13 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-faster-whisper==1.0.3
+fastapi==0.121.3
+uvicorn[standard]==0.38.0
+faster-whisper==1.2.1
 funasr==1.2.7
-numpy==1.26.4
+numpy==2.2.6
 onnxruntime-gpu==1.23.2
 requests==2.32.5
 jiwer==4.0.0
+python-multipart==0.0.20
+pyannote.audio==4.0.2
 git+https://github.com/speechbrain/speechbrain.git@develop
 # modal==1.2.2 # for hosting on modal
 # openai==2.8.1 # for using openai api
-# pyannote.audio==4.0.1
