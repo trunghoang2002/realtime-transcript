@@ -1,17 +1,20 @@
-# Patch SpeechBrain compatibility issue với huggingface_hub
-import fix_speechbrain  # Phải import TRƯỚC speechbrain
-from speechbrain.inference import EncoderClassifier
+from pyannote.audio.pipelines.speaker_diarization import SpeakerDiarization, DiarizeOutput
+from pyannote.audio.pipelines.utils.hook import ProgressHook
+from pyannote.audio.utils.signal import binarize
+from pyannote.core import Annotation, Segment
 import torch
 import numpy as np
 from typing import Optional, Dict, List, Callable, Union
 from scipy.spatial.distance import cdist
-from get_audio import decode_audio
+import soundfile as sf
+import tempfile
+import os
 
-class RealtimeSpeakerDiarization():
+class RealtimeSpeakerDiarization(SpeakerDiarization):
     """
     Realtime Speaker Diarization Pipeline with persistent speaker embeddings and session management
     
-    This class supports:
+    This class extends the standard SpeakerDiarization pipeline to support:
     1. Persistent speaker tracking across multiple audio chunks
     2. Multi-session management to handle different conversations independently
     3. 2-tier speaker matching (EMA embeddings + cluster centroids)
@@ -28,7 +31,7 @@ class RealtimeSpeakerDiarization():
     --------------
     ```python
     # Initialize pipeline
-    pipeline = RealtimeSpeakerDiarization()
+    pipeline = RealtimeSpeakerDiarization(token="your_hf_token")
     
     # Process conversation 1
     pipeline.set_session("meeting_1")
@@ -48,11 +51,17 @@ class RealtimeSpeakerDiarization():
     ```
     """
     
-    def __init__(self, model_name="speechbrain/spkrec-ecapa-tdnn-voxceleb",
+    def __init__(self, model_name="pyannote/speaker-diarization-community-1", 
+                 token=None, cache_dir=None, 
                  similarity_threshold=0.7,  # threshold để match speaker
                  embedding_update_weight=0.3,  # trọng số cập nhật embedding mới
                  min_similarity_gap=0.3,  # gap tối thiểu để match (nếu nổi bật)
                  *args, **kwargs):
+        super().__init__(
+            segmentation={"checkpoint": model_name, "subfolder": "segmentation"},
+            embedding={"checkpoint": model_name, "subfolder": "embedding"},
+            plda={"checkpoint": model_name, "subfolder": "plda"},
+            token=token, cache_dir=cache_dir, *args, **kwargs)
 
         # Session management
         self.current_session_id: Optional[str] = None
@@ -63,12 +72,6 @@ class RealtimeSpeakerDiarization():
         self.embedding_update_weight = embedding_update_weight
         self.min_similarity_gap = min_similarity_gap  # Gap threshold cho distinctive matching
         self.max_cluster_size = 20  # Giới hạn số embeddings trong cluster
-        self.embedding_metric = "cosine"
-
-        self.spk_model = EncoderClassifier.from_hparams(
-            source=model_name,
-            run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
-        )
     
     def _get_session_data(self, session_id: Optional[str] = None) -> Dict:
         """
@@ -218,7 +221,7 @@ class RealtimeSpeakerDiarization():
         memory_embeddings = np.array([speaker_memory[sid] for sid in memory_speaker_ids])
         
         # Tính cosine similarity hoặc euclidean distance
-        if self.embedding_metric == "cosine":
+        if self._embedding.metric == "cosine":
             # Cosine similarity (1 - cosine distance)
             distances = cdist(new_embeddings, memory_embeddings, metric='cosine')
             similarities_ema = 1 - distances
@@ -281,11 +284,11 @@ class RealtimeSpeakerDiarization():
                         centroid = np.mean(cluster_array, axis=0)
                         
                         # Normalize centroid nếu dùng cosine
-                        if self.embedding_metric == "cosine":
+                        if self._embedding.metric == "cosine":
                             centroid = centroid / np.linalg.norm(centroid)
                         
                         # Tính similarity với centroid
-                        if self.embedding_metric == "cosine":
+                        if self._embedding.metric == "cosine":
                             cluster_similarity = 1 - cdist([new_embedding], [centroid], metric='cosine')[0, 0]
                         else:
                             cluster_similarity = 1 / (1 + cdist([new_embedding], [centroid], metric='euclidean')[0, 0])
@@ -330,7 +333,7 @@ class RealtimeSpeakerDiarization():
                 updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
                                    self.embedding_update_weight * new_embedding
                 # Normalize nếu dùng cosine similarity
-                if self.embedding_metric == "cosine":
+                if self._embedding.metric == "cosine":
                     updated_embedding = updated_embedding / np.linalg.norm(updated_embedding)
                 speaker_memory[matched_speaker_id] = updated_embedding
                 
@@ -369,10 +372,10 @@ class RealtimeSpeakerDiarization():
                         if len(cluster) > 0:
                             cluster_array = np.array(cluster)
                             centroid = np.mean(cluster_array, axis=0)
-                            if self.embedding_metric == "cosine":
+                            if self._embedding.metric == "cosine":
                                 centroid = centroid / np.linalg.norm(centroid)
                             
-                            if self.embedding_metric == "cosine":
+                            if self._embedding.metric == "cosine":
                                 cluster_sim = 1 - cdist([new_embedding], [centroid], metric='cosine')[0, 0]
                             else:
                                 cluster_sim = 1 / (1 + cdist([new_embedding], [centroid], metric='euclidean')[0, 0])
@@ -397,7 +400,7 @@ class RealtimeSpeakerDiarization():
                         old_embedding = speaker_memory[matched_speaker_id]
                         updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
                                            self.embedding_update_weight * new_embedding
-                        if self.embedding_metric == "cosine":
+                        if self._embedding.metric == "cosine":
                             updated_embedding = updated_embedding / np.linalg.norm(updated_embedding)
                         speaker_memory[matched_speaker_id] = updated_embedding
                         
@@ -428,18 +431,21 @@ class RealtimeSpeakerDiarization():
                 
         return mapping
     
-    def apply_realtime(self, file_or_audio_f32: Union[str, np.ndarray], 
+    def apply_realtime(self, audio_file: str, 
+                      hook: Optional[Callable] = None,
                       use_memory: bool = True,
                       max_speakers: Optional[int] = None,
                       session_id: Optional[str] = None,
-                      **kwargs) -> dict:
+                      **kwargs) -> DiarizeOutput:
         """
         Apply diarization với context memory cho realtime processing
         
         Parameters
         ----------
-        file_or_audio_f32 : Union[str, np.ndarray]
-            Audio chunk hiện tại hoặc file path
+        audio_file : str
+            Audio file path hiện tại
+        hook : Optional[Callable]
+            Progress hook
         use_memory : bool
             Có sử dụng speaker memory hay không (False = xử lý như batch bình thường)
         max_speakers : int, optional
@@ -449,7 +455,7 @@ class RealtimeSpeakerDiarization():
         
         Returns
         -------
-        output : dict
+        output : DiarizeOutput
             Kết quả diarization với speaker labels đã được map với memory
         """
         # Set session if provided
@@ -458,40 +464,44 @@ class RealtimeSpeakerDiarization():
         elif use_memory and self.current_session_id is None:
             raise ValueError("No session_id provided and no current session set. "
                            "Call set_session() or provide session_id parameter.")
+
         # Gọi phương thức apply gốc
-        output = {}
-
-        if isinstance(file_or_audio_f32, str):
-            audio_f32 = decode_audio(file_or_audio_f32)
-        else:
-            audio_f32 = file_or_audio_f32
-
-         # === Trích embedding ===
-        # SpeechBrain yêu cầu tensor shape (batch, time)
-        try:
-            tensor = torch.tensor(audio_f32).unsqueeze(0)
-            with torch.no_grad():
-                emb = self.spk_model.encode_batch(tensor).detach().cpu().numpy().mean(axis=1)[0]
-        except Exception:
+        output = super().apply(audio_file, hook=hook, max_speakers=max_speakers, **kwargs)
+        
+        if not use_memory or output.speaker_embeddings is None:
             return output
-    
-        # Normalize embedding để ổn định hơn
-        emb_norm = emb / (np.linalg.norm(emb) + 1e-8)
-        emb_norm = np.expand_dims(emb_norm, axis=0)
-        output['speaker_embeddings'] = emb_norm
-        output['speaker_labels'] = ['SPEAKER_00']
-
-
-        if not use_memory or output['speaker_embeddings'] is None:
+        
+        # Extract embeddings và labels từ output
+        current_embeddings = output.speaker_embeddings  # (num_speakers, dimension)
+        current_labels = list(output.speaker_diarization.labels())
+        
+        if len(current_labels) == 0:
             return output
         
         # Get session data
         session_data = self._get_session_data()
         
-        # Extract embeddings và labels từ output
-        current_embeddings = output['speaker_embeddings']  # (num_speakers, dimension)
-        current_labels = output['speaker_labels']
-        
+        # Sort labels theo thứ tự thời gian xuất hiện để đảm bảo consistency
+        # (SPEAKER_00 nên là người xuất hiện đầu tiên)
+        if len(session_data['speaker_memory']) == 0:  # Chỉ sort cho chunk đầu tiên
+            label_first_appearance = {}
+            for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True):
+                if speaker not in label_first_appearance:
+                    label_first_appearance[speaker] = turn.start
+            
+            # Sort labels theo thời gian xuất hiện
+            sorted_labels = sorted(current_labels, key=lambda x: label_first_appearance.get(x, float('inf')))
+            
+            # Reorder embeddings theo sorted labels
+            label_to_idx = {label: i for i, label in enumerate(current_labels)}
+            sorted_embeddings = np.array([current_embeddings[label_to_idx[label]] for label in sorted_labels])
+            
+            current_labels = sorted_labels
+            current_embeddings = sorted_embeddings
+            
+            print(f"Sorted labels by appearance time: {current_labels}")
+        else:
+            print(f"Current labels: {current_labels}")
         
         # Match với speakers trong memory (pass max_speakers constraint)
         label_mapping = self._match_speakers_with_memory(
@@ -501,14 +511,23 @@ class RealtimeSpeakerDiarization():
         )
         print(f"Label mapping: {label_mapping}")
         
+        # Rename labels trong annotation
+        diarization = output.speaker_diarization.rename_labels(mapping=label_mapping)
+        print(f"Diarization: {diarization}")
+        exclusive_diarization = output.exclusive_speaker_diarization.rename_labels(mapping=label_mapping)
+        
         # Cập nhật embeddings theo thứ tự labels mới
-        new_labels_ordered = list(label_mapping.values())
+        new_labels_ordered = list(diarization.labels())
         print(f"New labels ordered: {new_labels_ordered}")
         updated_embeddings = np.array([session_data['speaker_memory'][label] for label in new_labels_ordered])
         
-        output['speaker_labels'] = new_labels_ordered
-        output['speaker_embeddings'] = updated_embeddings
-
+        # Tạo output mới
+        new_output = DiarizeOutput(
+            speaker_diarization=diarization,
+            exclusive_speaker_diarization=exclusive_diarization,
+            speaker_embeddings=updated_embeddings
+        )
+        
         # Lưu vào history
         session_data['speaker_history'].append({
             'chunk_id': session_data['total_chunks_processed'],
@@ -517,7 +536,7 @@ class RealtimeSpeakerDiarization():
         })
         session_data['total_chunks_processed'] += 1
         
-        return output
+        return new_output
     
     def get_speaker_info(self, session_id: Optional[str] = None) -> Dict:
         """
@@ -571,7 +590,7 @@ class RealtimeSpeakerDiarization():
             for session_id in self.sessions.keys()
         }
     
-    def __call__(self, file_or_audio_f32: Union[str, np.ndarray], num_speakers=None, min_speakers=None, max_speakers=None, 
+    def apply(self, file_or_audio_f32: Union[str, np.ndarray], hook=None, num_speakers=None, min_speakers=None, max_speakers=None, 
               use_memory=True, session_id=None, **kwargs):
         """Override apply để sử dụng realtime mode mặc định"""
         # Determine effective max_speakers
@@ -579,6 +598,7 @@ class RealtimeSpeakerDiarization():
         
         return self.apply_realtime(
             file_or_audio_f32, 
+            hook=hook, 
             use_memory=use_memory, 
             num_speakers=num_speakers, 
             min_speakers=min_speakers, 
@@ -590,13 +610,25 @@ class RealtimeSpeakerDiarization():
 # ============ EXAMPLE USAGE ============
 if __name__ == "__main__":
     # Khởi tạo realtime pipeline
+    import time
+    start_time = time.time()
+    from dotenv import load_dotenv
+    load_dotenv()
     pipeline = RealtimeSpeakerDiarization(
+        model_name="pyannote/speaker-diarization-community-1", 
+        token=os.getenv("HF_TOKEN"),
         similarity_threshold=0.7,  # threshold để match speaker (càng cao càng strict)
         embedding_update_weight=0.3,  # trọng số update embedding (0.3 = 30% mới, 70% cũ)
         min_similarity_gap=0.3  # gap tối thiểu để match nếu nổi bật hơn hẳn
     )
 
-    # Ví dụ 1: Xử lý audio chunk đầu tiên với Session ID
+    # Send pipeline to GPU (when available)
+    if torch.cuda.is_available():
+        pipeline.to(torch.device("cuda"))
+    end_time = time.time()
+    print(f"Time taken to initialize pipeline: {end_time - start_time:.2f} seconds")
+    
+    # Ví dụ 1: Xử lý một audio chunk với session_id (realtime mode)
     print("=" * 100)
     print("VÍ DỤ 1: Xử lý audio chunk đầu tiên với Session ID")
     print("=" * 100)
@@ -605,15 +637,24 @@ if __name__ == "__main__":
     session_1 = "conversation_1"
     pipeline.set_session(session_1)
 
-    output1 = pipeline(
-        "/home/hoang/speaker_diarization/wav/A1.wav",
-        num_speakers=2,
-        use_memory=True,
-        session_id=session_1
-    )
+    with ProgressHook() as hook:
+        output1 = pipeline(
+            "/home/hoang/speaker_diarization/wav/TestE_sub.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True,  # Sử dụng memory để track speakers
+            session_id=session_1  # Chỉ định session
+        )
 
-    print("\n📊 Kết quả chunk 1:")
-    print(f"  🎤 {output1['speaker_labels']}")
+    print("\n📊 Kết quả chunk 1:") # 1 thời điểm có thể có nhiều speaker nói
+    for turn, _, speaker in output1.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+
+    print("\n📊 Kết quả chunk 1 exclusive:") # 1 thời điểm chỉ có 1 speaker nói
+    for turn, _, speaker in output1.exclusive_speaker_diarization.itertracks(yield_label=True):
+        print(f"exclusive  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
 
     print(f"\n💾 Speaker Memory (Session {session_1}): {pipeline.get_speaker_info(session_1)}")
     print(f"\n📋 All Sessions: {pipeline.list_sessions()}")
@@ -625,21 +666,24 @@ if __name__ == "__main__":
     
     session_2 = "conversation_2"
     pipeline.set_session(session_2)
-
-    output2 = pipeline(
-        "/home/hoang/speaker_diarization/wav/A2.wav",
-        num_speakers=2,
-        use_memory=True,
-        session_id=session_2
-    )
-
+    
+    with ProgressHook() as hook:
+        output2 = pipeline(
+            "/home/hoang/speaker_diarization/wav/A2.wav",
+            hook=hook,
+            num_speakers=2,
+            use_memory=True,
+            session_id=session_2
+        )
+    
     print("\n📊 Kết quả chunk 1 (Session 2):")
-    print(f"  🎤 {output2['speaker_labels']}")
-
+    for turn, _, speaker in output2.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+    
     print(f"\n💾 Speaker Memory (Session {session_2}): {pipeline.get_speaker_info(session_2)}")
     print(f"💾 Speaker Memory (Session {session_1}): {pipeline.get_speaker_info(session_1)}")
     print(f"\n📋 All Sessions: {pipeline.list_sessions()}")
-
+    
     # Ví dụ 3: Quay lại session 1 và xử lý chunk tiếp theo
     print("\n" + "=" * 100)
     print("VÍ DỤ 3: Quay lại Session 1 và xử lý chunk tiếp theo")
@@ -647,15 +691,18 @@ if __name__ == "__main__":
     
     pipeline.set_session(session_1)  # Chuyển về session 1
 
-    output3 = pipeline(
-        "/home/hoang/speaker_diarization/wav/B1.wav",
-        num_speakers=2,
-        use_memory=True,
-        session_id=session_1
-    )
+    with ProgressHook() as hook:
+        output3 = pipeline(
+            "/home/hoang/speaker_diarization/wav/A1.wav",
+            hook=hook,
+            num_speakers=2,
+            use_memory=True,
+            session_id=session_1  # Continue with session 1
+        )
 
     print("\n📊 Kết quả chunk 2 (Session 1 continued):")
-    print(f"  🎤 {output3['speaker_labels']}")
+    for turn, _, speaker in output3.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
 
     print(f"\n💾 Speaker Memory (Session 1 updated): {pipeline.get_speaker_info(session_1)}")
     
@@ -673,10 +720,148 @@ if __name__ == "__main__":
     pipeline.reset_session(session_1)
     print(f"💾 Speaker Memory after reset: {pipeline.get_speaker_info(session_1)}")
     
+    # Delete một session
+    # print(f"\n🗑️  Deleting session: {session_2}")
+    # pipeline.delete_session(session_2)
+    # print(f"📋 Remaining sessions: {pipeline.list_sessions()}")
+    
     # Xem thông tin tất cả sessions
     print(f"\n📊 All sessions info:")
     for session_id, info in pipeline.get_all_sessions_info().items():
         print(f"  Session '{session_id}': {info['num_speakers']} speakers, {info['total_chunks']} chunks")
+    
+    print("=" * 100)
+
+    with ProgressHook() as hook:
+        output3 = pipeline(
+            "/home/hoang/speaker_diarization/wav/B1.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True
+        )
+
+    print("\n📊 Kết quả chunk 3:")
+    for turn, _, speaker in output3.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
 
     print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
     print("=" * 100)
+    print("=" * 100)
+
+    with ProgressHook() as hook:
+        output4 = pipeline(
+            "/home/hoang/speaker_diarization/wav/A2.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True
+        )
+
+    print("\n📊 Kết quả chunk 4:")
+    for turn, _, speaker in output4.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+
+    print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
+    print("=" * 100)
+    print("=" * 100)
+
+    with ProgressHook() as hook:
+        output5 = pipeline(
+            "/home/hoang/speaker_diarization/wav/B2.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True
+        )
+
+    print("\n📊 Kết quả chunk 5:")
+    for turn, _, speaker in output5.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+
+    print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
+    print("=" * 100)
+    print("=" * 100)
+
+    with ProgressHook() as hook:
+        output6 = pipeline(
+            "/home/hoang/speaker_diarization/wav/A3.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True
+        )
+
+    print("\n📊 Kết quả chunk 6:")
+    for turn, _, speaker in output6.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+
+    print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
+    print("=" * 100)
+    print("=" * 100)
+
+    with ProgressHook() as hook:
+        output7 = pipeline(
+            "/home/hoang/speaker_diarization/wav/B3.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True
+        )
+    print("\n📊 Kết quả chunk 7:")
+    for turn, _, speaker in output7.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+
+    print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
+    print("=" * 100)
+    print("=" * 100)
+
+    with ProgressHook() as hook:
+        output8 = pipeline(
+            "/home/hoang/speaker_diarization/wav/TestE_sub.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=True
+        )
+    print("\n📊 Kết quả chunk 8:")
+    for turn, _, speaker in output8.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")
+
+    print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
+    print("=" * 100)
+    print("=" * 100)
+
+    # Ví dụ 3: Reset context và bắt đầu conversation mới
+    print("\n" + "=" * 60)
+    print("VÍ DỤ 3: Reset context và bắt đầu lại")
+    print("=" * 60)
+
+    pipeline.reset_session()
+    print(f"✅ Context đã reset: {pipeline.get_speaker_info()}")
+
+    # Ví dụ 4: Disable memory (xử lý như batch mode bình thường)
+    print("\n" + "=" * 60)
+    print("VÍ DỤ 4: Xử lý không dùng memory (batch mode)")
+    print("=" * 60)
+
+    with ProgressHook() as hook:
+        output3 = pipeline(
+            # "/home/hoang/realtime-transcript/backend/eval/TestJ.mp3",
+            "/home/hoang/speaker_diarization/wav/A1.wav",
+            hook=hook,
+            # min_speakers=1,
+            # max_speakers=3,
+            num_speakers=2,
+            use_memory=False  # Không dùng memory
+        )
+
+    print("\n📊 Kết quả batch mode:")
+    for turn, _, speaker in output3.speaker_diarization.itertracks(yield_label=True):
+        print(f"  ⏱️  {turn.start:.1f}s → {turn.end:.1f}s | 🎤 {speaker}")

@@ -76,17 +76,15 @@ model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 # -------- Speaker Diarization model ----------
 # Preload speaker embedding model một lần để tránh load lại mỗi session
 from speechbrain_diarization import RealtimeSpeakerDiarization
-from speechbrain.inference import EncoderClassifier
 import torch
 
-logger.info("Loading speaker embedding model...")
-preloaded_speaker_model = EncoderClassifier.from_hparams(
-    source="speechbrain/spkrec-ecapa-voxceleb",
-    run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+diarization_model = RealtimeSpeakerDiarization(
+    model_name="speechbrain/spkrec-ecapa-tdnn-voxceleb",
+    similarity_threshold=0.6,
+    embedding_update_weight=0.3,
+    min_similarity_gap=0.25
 )
-logger.info("Speaker embedding model loaded successfully!")
 
-speaker_sessions = {} # Key: session_id (str), Value: RealtimeSpeakerDiarization()
 def pad_audio_for_embedding(audio_f32: np.ndarray, min_audio_length = 8000) -> np.ndarray:
     if audio_f32 is None:
         return np.array([], dtype=np.float32)
@@ -110,14 +108,8 @@ def pad_audio_for_embedding(audio_f32: np.ndarray, min_audio_length = 8000) -> n
 
 def get_speaker_id(audio_f32: np.ndarray, session_id: str = "default", max_speakers=None):
     # Lấy hoặc tạo state cho session này
-    if session_id not in speaker_sessions:
-        speaker_sessions[session_id] = RealtimeSpeakerDiarization(
-            similarity_threshold=0.5,
-            embedding_update_weight=0.25,
-            min_similarity_gap=0.2,
-            preloaded_model=preloaded_speaker_model,  # Dùng model đã preload
-        )
-    return speaker_sessions[session_id](pad_audio_for_embedding(audio_f32), max_speakers=max_speakers, use_memory=True)['speaker_labels'][0]
+    diarization_model.set_session(session_id)
+    return diarization_model(pad_audio_for_embedding(audio_f32), max_speakers=max_speakers, use_memory=True)['speaker_labels'][0]
 
 def has_repeated_substring(s: str, min_repeat: int = 5, min_len: int = 1) -> bool:
     """
@@ -178,7 +170,7 @@ async def transcribe_file(
         info = None
 
         # VAD filter
-        vad_options = VadOptions(min_silence_duration_ms=800)
+        vad_options = VadOptions(min_silence_duration_ms=1000)
         speech_chunks = get_speech_timestamps(audio, vad_options)
         # print("speech_chunks: ", speech_chunks)
 
@@ -186,8 +178,7 @@ async def transcribe_file(
         file_session_id = f"file_{uuid.uuid4().hex[:8]}"
 
         # Reset state cho session này
-        if file_session_id in speaker_sessions:
-            speaker_sessions[file_session_id].reset_context()
+        diarization_model.reset_session(file_session_id)
 
         normalized_max_speakers: Optional[int] = None
         if detect_speaker:
@@ -247,8 +238,7 @@ async def transcribe_file(
                     formatted_lines.append(chunk_line)
         
         # Cleanup: xóa session sau khi hoàn thành để tránh memory leak
-        if file_session_id in speaker_sessions:
-            del speaker_sessions[file_session_id]
+        diarization_model.delete_session(file_session_id)
 
         return {
             "text": "\n".join(formatted_lines),
@@ -261,8 +251,8 @@ async def transcribe_file(
         print(f"File transcription error: {e}")
 
         # Cleanup session ngay cả khi có lỗi
-        if 'file_session_id' in locals() and file_session_id in speaker_sessions:
-            del speaker_sessions[file_session_id]
+        if 'file_session_id' in locals():
+            diarization_model.delete_session(file_session_id)
         raise
 
 # ---- API endpoint for file upload ----
@@ -396,7 +386,7 @@ async def run_transcribe_on_full_buffer(
 
     try:
         # VAD filter
-        vad_options = VadOptions(min_silence_duration_ms=800)
+        vad_options = VadOptions(min_silence_duration_ms=900)
         speech_chunks = get_speech_timestamps(audio_f32, vad_options)
         if len(speech_chunks) == 0:
             return {"text": "", "segments": []}
@@ -654,9 +644,9 @@ async def ws_transcribe(ws: WebSocket):
                             # Vẫn reset full_buffer để tránh tích lũy quá nhiều
                             full_buffer = bytearray()
                             full_buffer_start_time = 0.0
-                    else:
-                        end_speech = False
-                        print("end_speech: ", end_speech)
+                    # else:
+                    #     end_speech = False
+                    #     print("end_speech: ", end_speech)
                 else:
                     # Lưu buffer vào full_buffer (chỉ khi không phải silence)
                     full_buffer.extend(current_buffer_bytes)
@@ -729,8 +719,7 @@ async def ws_transcribe(ws: WebSocket):
                             max_speakers_limit = None
                         
                         # Reset speaker tracking for new session
-                        if ws_session_id in speaker_sessions:
-                            speaker_sessions[ws_session_id].reset_context()
+                        diarization_model.reset_session(ws_session_id)
                         
                         # Reset time offset khi bắt đầu session mới
                         time_offset = 0.0
@@ -829,16 +818,15 @@ async def ws_transcribe(ws: WebSocket):
         logger.info(f"[WS] WebSocket connection closed for {client_ip}")
 
         # Cleanup: xóa session để tránh memory leak
-        if ws_session_id in speaker_sessions:
-            del speaker_sessions[ws_session_id]
-            logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
+        diarization_model.delete_session(ws_session_id)
+        logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
 
     except WebSocketDisconnect:
         session_duration = (datetime.now() - session_start).total_seconds() if 'session_start' in locals() else 0
         logger.info(f"[WS] WebSocket disconnected: client={client_ip}, duration={session_duration:.2f}s")
         # Cleanup session
-        if 'ws_session_id' in locals() and ws_session_id in speaker_sessions:
-            del speaker_sessions[ws_session_id]
+        if 'ws_session_id' in locals():
+            diarization_model.delete_session(ws_session_id)
             logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
     except Exception as e:
         session_duration = (datetime.now() - session_start).total_seconds() if 'session_start' in locals() else 0
@@ -850,8 +838,8 @@ async def ws_transcribe(ws: WebSocket):
             pass
         finally:
             # Cleanup session
-            if 'ws_session_id' in locals() and ws_session_id in speaker_sessions:
-                del speaker_sessions[ws_session_id]
+            if 'ws_session_id' in locals():
+                diarization_model.delete_session(ws_session_id)
                 logger.debug(f"[WS] Cleaned up session: {ws_session_id}")
 
 # ---- Serve frontend ----

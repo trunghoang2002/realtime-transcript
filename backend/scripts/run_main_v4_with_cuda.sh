@@ -44,4 +44,4 @@ echo "Starting server with CUDA support..."
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 
 # Chạy server
-CUDA_VISIBLE_DEVICES=0 uvicorn main:app --host 0.0.0.0 --port 8917 $RELOAD_FLAG
+CUDA_VISIBLE_DEVICES=1 uvicorn main_v4:app --host 0.0.0.0 --port 8921 $RELOAD_FLAG
