@@ -79,7 +79,7 @@ from speechbrain_diarization import RealtimeSpeakerDiarization
 import torch
 
 diarization_model = RealtimeSpeakerDiarization(
-    model_name="speechbrain/spkrec-ecapa-tdnn-voxceleb",
+    model_name="speechbrain/spkrec-ecapa-voxceleb",
     similarity_threshold=0.6,
     embedding_update_weight=0.3,
     min_similarity_gap=0.25

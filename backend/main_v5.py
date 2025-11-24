@@ -86,7 +86,7 @@ diarization_model = RealtimeSpeakerDiarization(
         "token": os.getenv("HF_TOKEN"),
     },
     speechbrain_config={
-        "model_name": "speechbrain/spkrec-ecapa-tdnn-voxceleb",
+        "model_name": "speechbrain/spkrec-ecapa-voxceleb",
     },
     similarity_threshold=0.6,
     embedding_update_weight=0.3,

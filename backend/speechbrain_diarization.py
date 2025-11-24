@@ -48,7 +48,7 @@ class RealtimeSpeakerDiarization():
     ```
     """
     
-    def __init__(self, model_name="speechbrain/spkrec-ecapa-tdnn-voxceleb",
+    def __init__(self, model_name="speechbrain/spkrec-ecapa-voxceleb",
                  similarity_threshold=0.7,  # threshold để match speaker
                  embedding_update_weight=0.3,  # trọng số cập nhật embedding mới
                  min_similarity_gap=0.3,  # gap tối thiểu để match (nếu nổi bật)
