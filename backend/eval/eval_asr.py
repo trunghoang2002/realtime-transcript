@@ -3,7 +3,7 @@ sys.path.append("..")
 import csv
 from jiwer import wer, cer
 import jiwer.transforms as tr
-import re
+import regex as re
 import numpy as np
 from tqdm import tqdm
 from abc import ABC, abstractmethod
@@ -20,6 +20,9 @@ from funasr import AutoModel
 from silero_vad import VadOptions, get_speech_timestamps, collect_chunks
 from get_audio import decode_audio
 import time
+import librosa
+import base64
+from openai import OpenAI
 
 class JPTokenizer:
     def __init__(self):
@@ -53,17 +56,28 @@ wer_ja = tr.Compose([
     JPTokenizer(),
 ])
 
+def get_audio_duration(file_path: str) -> float:
+    """Get audio duration in seconds."""
+    try:
+        duration = librosa.get_duration(path=file_path)
+        return duration
+    except Exception as e:
+        print(f"Error getting duration for {file_path}: {e}")
+        return 0.0
+
 def eval_score(ground_truth, prediction):
     # normalize text
     ground_truth = ground_truth.lower()
     prediction = prediction.lower()
 
-    pattern = r"[,.~!?・、。「」『』（）【】〈〉《》！？〜～…‥―：；※]"
+    pattern = r"[\p{P}～~＋＝＄|]+"
     ground_truth = re.sub(pattern, "", ground_truth)
     prediction = re.sub(pattern, "", prediction)
 
-    ground_truth = re.sub(r"\s+", " ", ground_truth).strip()
-    prediction = re.sub(r"\s+", " ", prediction).strip()
+    prediction = prediction.replace("<[^>]*>", "")
+
+    ground_truth = re.sub(r"[A-Za-z\s]+", "", ground_truth).strip()
+    prediction = re.sub(r"[A-Za-z\s]+", "", prediction).strip()
 
     wer_score = wer(ground_truth, prediction, reference_transform=wer_ja, hypothesis_transform=wer_ja)
     cer_score = cer(ground_truth, prediction)
@@ -258,7 +272,7 @@ class SenseVoiceJA(BaseASR):
             return self._transcribe_no_vad(audio)
 
 # ======================================================
-#               GEMINI 2.5 FLASH ASR CLASS
+#               GEMINI ASR CLASS
 # ======================================================
 class GeminiASR(BaseASR):
     def __init__(
@@ -308,32 +322,32 @@ class GeminiASR(BaseASR):
                     config=types.GenerateContentConfig(
                         temperature=0.0,
                         max_output_tokens=2048,
-                        safety_settings=[
-                            types.SafetySetting(
-                                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                                threshold=types.HarmBlockThreshold.OFF,
-                            ),
-                            types.SafetySetting(
-                                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                                threshold=types.HarmBlockThreshold.OFF,
-                            ),
-                            types.SafetySetting(
-                                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                                threshold=types.HarmBlockThreshold.OFF,
-                            ),
-                            types.SafetySetting(
-                                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                                threshold=types.HarmBlockThreshold.OFF,
-                            ),
-                            types.SafetySetting(
-                                category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-                                threshold=types.HarmBlockThreshold.OFF,
-                            ),
-                            types.SafetySetting(
-                                category=types.HarmCategory.HARM_CATEGORY_UNSPECIFIED,
-                                threshold=types.HarmBlockThreshold.OFF,
-                            ),
-                        ]
+                        # safety_settings=[
+                        #     types.SafetySetting(
+                        #         category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                        #         threshold=types.HarmBlockThreshold.OFF,
+                        #     ),
+                        #     types.SafetySetting(
+                        #         category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                        #         threshold=types.HarmBlockThreshold.OFF,
+                        #     ),
+                        #     types.SafetySetting(
+                        #         category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                        #         threshold=types.HarmBlockThreshold.OFF,
+                        #     ),
+                        #     types.SafetySetting(
+                        #         category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        #         threshold=types.HarmBlockThreshold.OFF,
+                        #     ),
+                        #     types.SafetySetting(
+                        #         category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                        #         threshold=types.HarmBlockThreshold.OFF,
+                        #     ),
+                        #     types.SafetySetting(
+                        #         category=types.HarmCategory.HARM_CATEGORY_UNSPECIFIED,
+                        #         threshold=types.HarmBlockThreshold.OFF,
+                        #     ),
+                        # ]
                     ),
                 )
                 return response.text.strip()
@@ -351,7 +365,8 @@ class GeminiASR(BaseASR):
                     print(f"All {max_retries} attempts failed.")
         
         # If all retries failed, raise the last exception
-        raise last_exception
+        # raise last_exception
+        return ""
     
     # ------------------------------------------------------
     #     Transcribe WITHOUT VAD
@@ -392,11 +407,144 @@ class GeminiASR(BaseASR):
         else:
             return self._transcribe_no_vad(audio)
 
-# transcriber = WhisperJA(
-#     model_name="medium", # tiny, base, small, medium, large, large-v1, large-v2, large-v3, turbo
-#     device="cuda",
-#     compute_type="float16"
-# )
+# ======================================================
+#               VLLM ASR CLASS
+# ======================================================
+class VllmASR(BaseASR):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "EMPTY",
+        model_name: str = "Qwen/Qwen2-Audio-7B-Instruct",
+        prompt: str = "Transcribe the audio into text."
+    ):
+        """
+        Initialize VLLM ASR with OpenAI-compatible API endpoint.
+        
+        Args:
+            base_url: Base URL of the vLLM server (e.g., "https://...modal.run/v1")
+            api_key: API key (default: "EMPTY" for endpoints that don't require auth)
+            model_name: Model name to use
+            prompt: Transcription prompt
+        """
+        self.model_name = model_name
+        self.prompt = prompt
+        
+        # Initialize OpenAI client with custom base URL
+        self.client = OpenAI(
+            base_url=base_url,
+            api_key=api_key
+        )
+
+    # ------------------------------------------------------
+    # Helper: Convert audio ndarray → base64 data URL
+    # ------------------------------------------------------
+    def _audio_to_data_url(self, audio: np.ndarray, sr: int = 16000) -> str:
+        """
+        Convert audio numpy array to base64 data URL.
+        """
+        # Convert to WAV bytes
+        buffer = io.BytesIO()
+        sf.write(buffer, audio, samplerate=sr, format="WAV")
+        buffer.seek(0)
+        wav_bytes = buffer.read()
+        
+        # Encode to base64
+        encoded_string = base64.b64encode(wav_bytes).decode("utf-8")
+        mime_type = "audio/wav"
+        
+        return f"data:{mime_type};base64,{encoded_string}"
+
+    # ------------------------------------------------------
+    # Helper: Call vLLM API
+    # ------------------------------------------------------
+    def _call_vllm(self, audio_data_url: str, max_retries: int = 3) -> str:
+        """
+        Call vLLM API with audio data URL.
+        """
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "audio_url",
+                                    "audio_url": {
+                                        "url": audio_data_url
+                                    }
+                                },
+                                {
+                                    "type": "text",
+                                    "text": self.prompt
+                                }
+                            ]
+                        }
+                    ]
+                )
+                
+                return response.choices[0].message.content.strip()
+            
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    # Wait before retrying (exponential backoff)
+                    wait_time = 2 ** attempt  # 1s, 2s, 4s
+                    print(f"Attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"All {max_retries} attempts failed: {last_exception}")
+        
+        return ""
+
+    # ------------------------------------------------------
+    #     Transcribe WITHOUT VAD
+    # ------------------------------------------------------
+    def _transcribe_no_vad(self, audio):
+        audio_data_url = self._audio_to_data_url(audio)
+        text = self._call_vllm(audio_data_url)
+        if text and text.lower() != "no speech":
+            return text
+        else:
+            return ""
+
+    # ------------------------------------------------------
+    #       Transcribe WITH VAD
+    # ------------------------------------------------------
+    def _transcribe_with_vad(self, audio):
+        vad_options = VadOptions(min_silence_duration_ms=800)
+        speech_chunks = get_speech_timestamps(audio, vad_options)
+
+        all_text = []
+
+        for chunk in speech_chunks:
+            audio_idx = collect_chunks(audio, [chunk])
+            audio_data_url = self._audio_to_data_url(audio_idx)
+            text = self._call_vllm(audio_data_url)
+            if text and text.lower() != "no speech":
+                all_text.append(text)
+
+        return "".join(all_text)
+
+    # ------------------------------------------------------
+    #           PUBLIC API
+    # ------------------------------------------------------
+    def transcribe(self, file_path: str, vad_filter: bool = False) -> str:
+        audio = decode_audio(file_path)
+        if vad_filter:
+            return self._transcribe_with_vad(audio)
+        else:
+            return self._transcribe_no_vad(audio)
+
+transcriber = WhisperJA(
+    model_name="large-v1", # tiny, base, small, medium, large, large-v1, large-v2, large-v3, turbo
+    device="cuda",
+    compute_type="float16"
+)
 
 # transcriber = SenseVoiceJA(
 #     model_name="iic/SenseVoiceSmall",
@@ -406,10 +554,26 @@ class GeminiASR(BaseASR):
 #     use_itn=False,
 # )
 
-transcriber = GeminiASR(
-    api_key=os.getenv("GEMINI_API_KEY"),
-    model_name="gemini-2.5-flash", # gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro
-)
+# transcriber = GeminiASR(
+#     api_key=os.getenv("GEMINI_API_KEY"),
+#     model_name="gemini-2.5-pro", # gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro
+# )
+
+# MODEL_NAME = "Qwen/Qwen2-Audio-7B-Instruct"
+# BASE_URL = "https://vjclaspi1--qwen-audio-modal-serve-dev.modal.run/v1"
+# # MODEL_NAME = "qwen3-omni-30B"
+# # BASE_URL = "https://game-powerful-kit.ngrok-free.app/v1"
+# transcriber = VllmASR(
+#     base_url=BASE_URL,
+#     api_key="EMPTY",
+#     model_name=MODEL_NAME,
+#     prompt=(
+#             "Generate a transcript of the speech. "
+#             "Return ONLY the transcript. "
+#             "If no speech, return 'no speech'. "
+#             "Language: Japanese."
+#         )
+# )
 
 # ============================================
 #   CHECKPOINT MECHANISM
@@ -431,11 +595,12 @@ else:
     # Create new results file with header
     with open(results_file, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["file_path", "ground_truth", "prediction", "wer_score", "cer_score"])
+        writer.writerow(["file_path", "ground_truth", "prediction", "wer_score", "cer_score", "rtf", "audio_duration", "processing_time"])
     print(f"Created new checkpoint file: {results_file}")
 
 wer_scores = []
 cer_scores = []
+rtf_scores = []
 
 # Read dataset & evaluate
 with open("dataset_400_testcases.csv", "r") as f:
@@ -455,16 +620,30 @@ with open("dataset_400_testcases.csv", "r") as f:
             continue
         
         try:
+            # Get audio duration
+            audio_duration = get_audio_duration(file_path)
+            
+            # Measure processing time
+            start_time = time.time()
             prediction = transcriber.transcribe(file_path)
+            processing_time = time.time() - start_time
+            
+            # Calculate RTF
+            rtf = processing_time / audio_duration if audio_duration > 0 else 0.0
+            
+            if prediction == "":
+                print(f"No prediction for {file_path}")
+                continue
             wer_score, cer_score = eval_score(ground_truth, prediction)
             
             # Save result immediately after each test case
             with open(results_file, "a", encoding="utf-8", newline="") as f_out:
                 writer = csv.writer(f_out)
-                writer.writerow([file_path, ground_truth, prediction, wer_score, cer_score])
+                writer.writerow([file_path, ground_truth, prediction, wer_score, cer_score, rtf, audio_duration, processing_time])
             
             wer_scores.append(wer_score)
             cer_scores.append(cer_score)
+            rtf_scores.append(rtf)
             
         except Exception as e:
             print(f"\nError processing {file_path}: {e}")
@@ -476,17 +655,32 @@ print("\n" + "="*50)
 print("FINAL RESULTS")
 print("="*50)
 
+results_file = "eval_results_checkpoint.csv"
 all_wer_scores = []
 all_cer_scores = []
+all_rtf_scores = []
 
 with open(results_file, "r", encoding="utf-8") as f:
     reader = csv.reader(f)
     next(reader)  # skip header
     for row in reader:
-        if len(row) >= 5:
+        if len(row) >= 6 and row[3] != "" and row[4] != "" and row[5] != "":
             all_wer_scores.append(float(row[3]))
             all_cer_scores.append(float(row[4]))
+            all_rtf_scores.append(float(row[5]))
+        # # Re-evaluate all test cases
+        # if len(row) >= 3 and row[1] != "" and row[2] != "":
+        #     wer_score, cer_score = eval_score(row[1], row[2])
+        #     all_wer_scores.append(wer_score)
+        #     all_cer_scores.append(cer_score)
+        # if len(row) >= 6 and row[5] != "":
+        #     all_rtf_scores.append(float(row[5]))
+
 
 print(f"Total evaluated: {len(all_wer_scores)} test cases")
 print(f"WER: {np.mean(all_wer_scores):.4f}")
 print(f"CER: {np.mean(all_cer_scores):.4f}")
+if all_rtf_scores:
+    print(f"RTF: {np.mean(all_rtf_scores):.4f} (mean)")
+    print(f"RTF: {np.median(all_rtf_scores):.4f} (median)")
+    print(f"RTF: {np.min(all_rtf_scores):.4f} (min) | {np.max(all_rtf_scores):.4f} (max)")

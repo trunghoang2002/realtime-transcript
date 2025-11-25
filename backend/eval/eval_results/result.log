@@ -1,0 +1,31 @@
+=== Evaluating pyannote embeddings ===
+Skipped 251/15000 trials due to missing embeddings
+Computing metrics on 14749 valid trials
+EER: 27.77% | FAR@EER: 27.77% | FRR@EER: 27.76% | Thr(EER): 0.2995
+Precision@EER: 56.56% | Recall@EER: 72.24% | F1@EER: 63.44%
+Best F1: 65.28% | Precision@F1: 68.16% | Recall@F1: 62.64% | Thr(F1): 0.4175
+AUC: 0.7882
+
+=== Evaluating speechbrain embeddings ===
+Skipped 251/15000 trials due to missing embeddings
+Computing metrics on 14749 valid trials
+EER: 15.36% | FAR@EER: 15.36% | FRR@EER: 15.37% | Thr(EER): 0.3781
+Precision@EER: 73.39% | Recall@EER: 84.63% | F1@EER: 78.61%
+Best F1: 86.70% | Precision@F1: 99.14% | Recall@F1: 77.03% | Thr(F1): 0.6130
+AUC: 0.9369
+
+=== Plotting curves ===
+
+ROC curve saved to: eval_results/roc_curves.png
+DET curve saved to: eval_results/det_curves.png
+Precision-Recall curve saved to: eval_results/precision_recall_curves.png
+
+=== Final Results ===
+Pyannote: {'EER': 0.27769589657947646, 'threshold_at_EER': 0.299517510560555, 'FAR_at_EER': 0.2777495167361888, 'FRR_at_EER': 0.2776422764227642, 'precision_at_EER': 0.5655633354551242, 'recall_at_EER': 0.7223577235772358, 'F1_at_EER': 0.6344162799000357, 'best_F1': 0.6528277907223046, 'threshold_at_best_F1': 0.41750451029192304, 'precision_at_best_F1': 0.6815568332596197, 'recall_at_best_F1': 0.6264227642276423, 'AUC': 0.7882437237740981, 'FAR_curve': array([0.        , 0.        , 0.        , ..., 0.99989826, 0.99989826,
+       1.        ], shape=(4588,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 9.98780488e-01, ...,
+       4.06504065e-04, 0.00000000e+00, 0.00000000e+00], shape=(4588,)), 'thresholds': array([        inf,  0.9519734 ,  0.94280498, ..., -0.1990335 ,
+       -0.2250784 , -0.22687587], shape=(4588,))}
+SpeechBrain: {'EER': 0.15364277933144577, 'threshold_at_EER': 0.3781467771103011, 'FAR_at_EER': 0.15362702207752568, 'FRR_at_EER': 0.15365853658536588, 'precision_at_EER': 0.7338738103630595, 'recall_at_EER': 0.8463414634146341, 'F1_at_EER': 0.7861053426467812, 'best_F1': 0.8669792977238934, 'threshold_at_best_F1': 0.6129652218046867, 'precision_at_best_F1': 0.9913680355741564, 'recall_at_best_F1': 0.7703252032520326, 'AUC': 0.9368787981805955, 'FAR_curve': array([0.        , 0.        , 0.        , ..., 0.99715129, 0.99715129,
+       1.        ], shape=(1926,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.97764228e-01, ...,
+       2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1926,)), 'thresholds': array([        inf,  0.9400493 ,  0.70697628, ..., -0.06335743,
+       -0.06396167, -0.17806255], shape=(1926,))}

@@ -1,182 +1,553 @@
-# 📊 Evaluation Script Documentation
+# 📊 Evaluation Scripts Documentation
 
-Script đánh giá chất lượng transcription bằng cách so sánh kết quả dự đoán với ground truth, sử dụng các metrics WER (Word Error Rate) và CER (Character Error Rate).
+Hệ thống đánh giá chất lượng cho 2 tác vụ chính:
+1. **ASR Evaluation** (`eval_asr.py`): Đánh giá chất lượng nhận dạng giọng nói (Speech Recognition)
+2. **Diarization Evaluation** (`eval_diarization.py`): Đánh giá chất lượng phân biệt người nói (Speaker Verification)
+
+---
+
+# 🎤 Part 1: ASR Evaluation
 
 ## 📋 Mục đích
 
-Script `eval.py` được sử dụng để:
-- Đánh giá độ chính xác của các model transcription (Whisper, SenseVoice)
+Script `eval_asr.py` được sử dụng để:
+- Đánh giá độ chính xác của các model ASR (Whisper, SenseVoice, Gemini, VLLM)
+- Đo lường hiệu suất xử lý thời gian thực (Real-Time Factor - RTF)
 - So sánh hiệu suất giữa các model khác nhau
-- So sánh hiệu suất giữa realtime và upload transcription
-- Đánh giá chất lượng trên các ngôn ngữ khác nhau (tiếng Nhật, tiếng Anh, ...)
+- Đánh giá với/không có VAD filtering
+- Hỗ trợ checkpoint để tiếp tục evaluation khi bị gián đoạn
 
-## 🔧 Dependencies
+## 🏗️ Kiến trúc hệ thống
 
-Script yêu cầu thư viện `jiwer` để tính toán WER và CER:
+### Base Class: `BaseASR`
+Abstract class định nghĩa interface chung cho tất cả ASR models:
+- `_transcribe_no_vad(audio)`: Transcribe không dùng VAD
+- `_transcribe_with_vad(audio)`: Transcribe có dùng VAD
+- `transcribe(file_path, vad_filter)`: Public API
 
-```bash
-pip install jiwer
+### Supported ASR Models
+
+#### 1. **WhisperJA** (Faster Whisper)
+```python
+transcriber = WhisperJA(
+    model_name="large-v3",  # tiny, base, small, medium, large, large-v1, large-v2, large-v3, turbo
+    device="cuda",
+    compute_type="float16",
+    beam_size=5,
+    best_of=5,
+    temperature=0.0
+)
 ```
 
-## 📁 Cấu trúc thư mục
+**Features:**
+- Hỗ trợ multiple model sizes
+- Tối ưu với faster-whisper (CTranslate2)
+- VAD filtering với Silero VAD
+- Beam search và temperature control
 
+#### 2. **SenseVoiceJA** (FunASR)
+```python
+transcriber = SenseVoiceJA(
+    model_name="iic/SenseVoiceSmall",
+    device="cuda",
+    max_single_segment_time=30000,
+    batch_size_s=20,
+    use_itn=False
+)
 ```
-eval/
-├── eval.py                    # Script đánh giá chính
-├── eval.md                    # Tài liệu này
-├── ja/                        # Test cases tiếng Nhật
-│   ├── ground_truth_full.txt  # Ground truth (full transcript)
-│   ├── ground_truth.txt       # Ground truth (segments)
-│   ├── realtime/             # Kết quả realtime transcription
-│   │   ├── whisper-small/
-│   │   │   ├── predict_full.txt
-│   │   │   └── predict.txt
-│   │   ├── whisper-medium/
-│   │   └── sensevoice-small/
-│   └── upload/                # Kết quả upload transcription
-│       ├── whisper-small/
-│       └── ...
-└── en/                        # Test cases tiếng Anh
-    ├── ground_truth_full.txt
-    ├── realtime/
-    └── upload/
+
+**Features:**
+- Optimized cho tiếng Nhật
+- Batch processing
+- Inverse Text Normalization (ITN)
+
+#### 3. **GeminiASR** (Google Gemini)
+```python
+transcriber = GeminiASR(
+    api_key=os.getenv("GEMINI_API_KEY"),
+    model_name="gemini-2.5-pro"  # gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro
+)
 ```
+
+**Features:**
+- Cloud-based ASR
+- Hỗ trợ multiple languages
+- Automatic retry với exponential backoff
+- Temperature=0.0 cho reproducibility
+
+#### 4. **VllmASR** (vLLM Server)
+```python
+transcriber = VllmASR(
+    base_url="https://your-vllm-server.com/v1",
+    api_key="EMPTY",
+    model_name="Qwen/Qwen2-Audio-7B-Instruct",
+    prompt="Transcribe the audio into text."
+)
+```
+
+**Features:**
+- OpenAI-compatible API
+- Custom prompt engineering
+- Base64 audio encoding
+- Exponential backoff retry
 
 ## 📊 Metrics
 
-### WER (Word Error Rate)
-- **Định nghĩa**: Tỷ lệ lỗi từ (số từ bị thay thế, xóa, hoặc thêm vào)
+### 1. WER (Word Error Rate)
+- **Định nghĩa**: Tỷ lệ lỗi từ
 - **Công thức**: `WER = (S + D + I) / N`
   - S: Số từ bị thay thế (Substitutions)
   - D: Số từ bị xóa (Deletions)
   - I: Số từ bị thêm vào (Insertions)
   - N: Tổng số từ trong ground truth
 - **Giá trị**: 0.0 = hoàn hảo, càng cao càng kém
+- **Tokenization**: Sử dụng Sudachi tokenizer cho tiếng Nhật
 
-### CER (Character Error Rate)
-- **Định nghĩa**: Tỷ lệ lỗi ký tự (số ký tự bị thay thế, xóa, hoặc thêm vào)
-- **Công thức**: `CER = (S + D + I) / N`
-  - Tương tự WER nhưng tính theo ký tự thay vì từ
+### 2. CER (Character Error Rate)
+- **Định nghĩa**: Tỷ lệ lỗi ký tự
+- **Công thức**: `CER = (S + D + I) / N` (tính theo ký tự)
 - **Giá trị**: 0.0 = hoàn hảo, càng cao càng kém
-- **Hữu ích cho**: Ngôn ngữ không có khoảng trắng giữa từ (như tiếng Nhật, tiếng Trung)
+- **Hữu ích cho**: Ngôn ngữ không có khoảng trắng (tiếng Nhật, tiếng Trung)
 
-## 🔄 Quy trình Normalize
+### 3. RTF (Real-Time Factor)
+- **Định nghĩa**: Tỷ lệ giữa thời gian xử lý và độ dài audio
+- **Công thức**: `RTF = processing_time / audio_duration`
+- **Giá trị**: 
+  - RTF < 1.0: Xử lý nhanh hơn realtime (tốt)
+  - RTF = 1.0: Xử lý đúng bằng realtime
+  - RTF > 1.0: Xử lý chậm hơn realtime (không đủ cho realtime)
 
-Trước khi tính toán metrics, text được normalize theo các bước sau:
+## 🔄 Text Normalization
 
-1. **Lowercase**: Chuyển tất cả về chữ thường
-   ```python
-   ground_truth = ground_truth.lower()
-   prediction = prediction.lower()
-   ```
+Trước khi tính WER/CER, text được normalize:
 
-2. **Loại bỏ punctuation**: Xóa các dấu câu
-   - Tiếng Anh: `,.~!?`
-   - Tiếng Nhật: `・、。「」『』（）【】〈〉《》！？〜～…‥―：；※`
-   ```python
-   pattern = r"[,.~!?・、。「」『』（）【】〈〉《》！？〜～…‥―：；※]"
-   ```
+```python
+def eval_score(ground_truth, prediction):
+    # 1. Lowercase
+    ground_truth = ground_truth.lower()
+    prediction = prediction.lower()
+    
+    # 2. Remove punctuation (Japanese)
+    pattern = r"[\p{P}～~＋＝＄|]+"
+    ground_truth = re.sub(pattern, "", ground_truth)
+    prediction = re.sub(pattern, "", prediction)
+    
+    # 3. Remove tags
+    prediction = prediction.replace("<[^>]*>", "")
+    
+    # 4. Remove English/spaces
+    ground_truth = re.sub(r"[A-Za-z\s]+", "", ground_truth).strip()
+    prediction = re.sub(r"[A-Za-z\s]+", "", prediction).strip()
+    
+    # 5. Calculate metrics with Japanese tokenizer
+    wer_score = wer(ground_truth, prediction, 
+                    reference_transform=wer_ja, 
+                    hypothesis_transform=wer_ja)
+    cer_score = cer(ground_truth, prediction)
+    return wer_score, cer_score
+```
 
-3. **Normalize whitespace**: Chuẩn hóa khoảng trắng (nhiều space thành 1 space)
-   ```python
-   re.sub(r"\s+", " ", text).strip()
-   ```
+## 💾 Checkpoint Mechanism
+
+Script hỗ trợ checkpoint để tiếp tục evaluation khi bị gián đoạn:
+
+```python
+results_file = "eval_results_checkpoint.csv"
+```
+
+**Features:**
+- Tự động lưu kết quả sau mỗi test case
+- Resume từ file checkpoint nếu script bị dừng
+- Track completed files để không xử lý lại
+
+**CSV Format:**
+```csv
+file_path,ground_truth,prediction,wer_score,cer_score,rtf,audio_duration,processing_time
+```
 
 ## 🚀 Cách sử dụng
 
-### 1. Chuẩn bị dữ liệu
-
-Đảm bảo bạn có:
-- File `ground_truth_full.txt` trong thư mục `{lang}/`
-- File `predict_full.txt` trong thư mục `{lang}/{type}/{model}/`
-
-### 2. Cấu hình script
-
-Chỉnh sửa các biến trong `eval.py`:
-
-```python
-lang = "ja"              # Ngôn ngữ: "ja" | "en"
-type = "realtime"        # Loại: "realtime" | "upload"
-model = "sensevoice-small"  # Model: "sensevoice-small" | "whisper-small" | "whisper-medium"
+### 1. Chuẩn bị dataset
+Dataset CSV với format:
+```csv
+...,file_path,ground_truth
+...,audio/file1.wav,これはテストです
+...,audio/file2.wav,音声認識の評価
 ```
 
-### 3. Chạy script
+### 2. Cấu hình transcriber
+Uncomment model bạn muốn test trong `eval_asr.py`:
 
+```python
+# Option 1: Whisper
+transcriber = WhisperJA(
+    model_name="large-v1",
+    device="cuda",
+    compute_type="float16"
+)
+
+# Option 2: SenseVoice
+# transcriber = SenseVoiceJA(...)
+
+# Option 3: Gemini
+# transcriber = GeminiASR(...)
+
+# Option 4: VLLM
+# transcriber = VllmASR(...)
+```
+
+### 3. Chạy evaluation
 ```bash
 cd backend/eval
-python eval.py
+python eval_asr.py
+```
+
+### 4. Xem kết quả
+```
+Total test cases: 400
+Remaining: 350
+Processing: 100%|████████████| 400/400
+==================================================
+FINAL RESULTS
+==================================================
+Total evaluated: 400 test cases
+WER: 0.1234
+CER: 0.0567
+RTF: 0.4567 (mean)
+RTF: 0.4123 (median)
+RTF: 0.2100 (min) | 0.9800 (max)
+```
+
+---
+
+# 👥 Part 2: Diarization Evaluation
+
+## 📋 Mục đích
+
+Script `eval_diarization.py` được sử dụng để:
+- Đánh giá chất lượng speaker verification/diarization
+- So sánh 2 loại embeddings: Pyannote và SpeechBrain
+- Tính toán multiple metrics: EER, FAR, FRR, Precision, Recall, F1, AUC
+- Visualize ROC curves, DET curves, Precision-Recall curves
+- Tìm optimal threshold cho từng metric
+
+## 🔧 Dependencies
+
+```bash
+pip install scikit-learn
+pip install matplotlib
+pip install tqdm
+pip install numpy
+```
+
+## 🏗️ Kiến trúc hệ thống
+
+### Pipeline
+```python
+from fusion_diarization import RealtimeSpeakerDiarization
+pipeline = RealtimeSpeakerDiarization()
+```
+
+Pipeline extract 2 loại embeddings:
+- **Pyannote embeddings**: From pyannote.audio
+- **SpeechBrain embeddings**: From SpeechBrain ECAPA-TDNN
+
+### Evaluation Process
+
+1. **List speakers and utterances**: Scan dataset folder
+2. **Build trials**: Tạo genuine pairs (cùng speaker) và impostor pairs (khác speaker)
+3. **Extract embeddings**: Extract 1 lần cho tất cả files
+4. **Compute scores**: Tính cosine similarity cho từng trial
+5. **Calculate metrics**: EER, FAR, FRR, Precision, Recall, F1, AUC
+6. **Visualize**: Vẽ và lưu ROC, DET, PR curves
+
+## 📊 Metrics
+
+### 1. EER (Equal Error Rate)
+- **Định nghĩa**: Điểm mà FAR = FRR
+- **Giá trị**: Càng thấp càng tốt (0% = hoàn hảo)
+- **Ý nghĩa**: Cân bằng giữa false accept và false reject
+
+### 2. FAR (False Acceptance Rate)
+- **Định nghĩa**: Tỷ lệ impostor pairs bị accept nhầm
+- **Công thức**: `FAR = FP / (FP + TN)`
+- **Giá trị**: Càng thấp càng tốt
+
+### 3. FRR (False Rejection Rate)
+- **Định nghĩa**: Tỷ lệ genuine pairs bị reject nhầm
+- **Công thức**: `FRR = FN / (FN + TP)`
+- **Giá trị**: Càng thấp càng tốt
+
+### 4. Precision
+- **Công thức**: `Precision = TP / (TP + FP)`
+- **Giá trị**: 0.0 - 1.0 (càng cao càng tốt)
+
+### 5. Recall (Sensitivity, TPR)
+- **Công thức**: `Recall = TP / (TP + FN)`
+- **Giá trị**: 0.0 - 1.0 (càng cao càng tốt)
+
+### 6. F1 Score
+- **Công thức**: `F1 = 2 * (Precision * Recall) / (Precision + Recall)`
+- **Giá trị**: 0.0 - 1.0 (càng cao càng tốt)
+
+### 7. AUC (Area Under ROC Curve)
+- **Định nghĩa**: Diện tích dưới ROC curve
+- **Giá trị**: 0.0 - 1.0 (1.0 = perfect classifier)
+
+## 📁 Dataset Structure
+
+Dataset cần tuân theo cấu trúc:
+```
+dataset/
+├── speaker_001/
+│   ├── falset10/
+│   │   └── wav24kHz16bit/
+│   │       ├── file1.wav
+│   │       └── file2.wav
+│   ├── nonpara30/
+│   │   └── wav24kHz16bit/
+│   ├── parallel100/
+│   │   └── wav24kHz16bit/
+│   └── whisper10/
+│       └── wav24kHz16bit/
+├── speaker_002/
+│   └── ...
+```
+
+**Yêu cầu:**
+- Mỗi speaker có ít nhất 2 utterances
+- 4 loại folder: `falset10`, `nonpara30`, `parallel100`, `whisper10`
+- Audio files trong `wav24kHz16bit/`
+
+## 🎯 Trial Generation
+
+### Genuine Pairs (label=1)
+- Cặp 2 utterances khác nhau của cùng 1 speaker
+- Max pairs per speaker: `max_genuine_per_spk=50`
+
+### Impostor Pairs (label=0)
+- Cặp utterances từ 2 speakers khác nhau
+- Pairs per speaker: `impostor_per_spk=100`
+
+### Example
+```python
+trials = build_trials(
+    spk2utts,
+    max_genuine_per_spk=50,  # Max 50 genuine pairs mỗi speaker
+    impostor_per_spk=100     # 100 impostor pairs mỗi speaker
+)
+# Output: [(path1, path2, label), ...]
+```
+
+## 🎨 Visualization
+
+Script tự động tạo 3 loại biểu đồ trong folder `eval_results/`:
+
+### 1. ROC Curve (`roc_curves.png`)
+- **Trục X**: False Positive Rate (FAR)
+- **Trục Y**: True Positive Rate (1 - FRR)
+- **Features**:
+  - So sánh Pyannote vs SpeechBrain
+  - Hiển thị AUC score
+  - Đánh dấu điểm EER
+  - Đường baseline (random classifier)
+
+### 2. DET Curve (`det_curves.png`)
+- **Trục X**: False Acceptance Rate (%)
+- **Trục Y**: False Rejection Rate (%)
+- **Features**:
+  - Dễ nhìn hơn cho speaker verification
+  - Đánh dấu điểm EER
+  - Đường chéo FAR=FRR
+
+### 3. Precision-Recall Curve (`precision_recall_curves.png`)
+- **Trục X**: Recall
+- **Trục Y**: Precision
+- **Features**:
+  - Hiển thị PR AUC
+  - Đánh dấu điểm Best F1
+  - So sánh 2 embeddings
+
+## 🚀 Cách sử dụng
+
+### 1. Chuẩn bị dataset
+Organize audio files theo cấu trúc folder như trên.
+
+### 2. Cấu hình (optional)
+Trong `eval_diarization.py`, có thể điều chỉnh:
+```python
+# Số lượng trials
+max_genuine_per_spk = 50
+impostor_per_spk = 100
+
+# Output directory cho biểu đồ
+output_dir = "eval_results"
+
+# Dataset path
+dataset_path = "dataset/jvs_ver1"
+```
+
+### 3. Chạy evaluation
+```bash
+cd backend/eval
+python eval_diarization.py
 ```
 
 ### 4. Xem kết quả
 
-Script sẽ in ra console:
+**Console Output:**
 ```
-WER: 0.1234
-CER: 0.0567
+Found 100 speakers usable.
+Total trials: 15000
+Extracting embeddings: 100%|████████| 500/500
+
+=== Evaluating pyannote embeddings ===
+Computing metrics on 14850 valid trials
+EER: 5.23% | FAR@EER: 5.21% | FRR@EER: 5.25% | Thr(EER): 0.6234
+Precision@EER: 94.77% | Recall@EER: 94.75% | F1@EER: 94.76%
+Best F1: 96.12% | Precision@F1: 95.89% | Recall@F1: 96.35% | Thr(F1): 0.6789
+AUC: 0.9876
+
+=== Evaluating speechbrain embeddings ===
+Computing metrics on 14850 valid trials
+EER: 4.87% | FAR@EER: 4.85% | FRR@EER: 4.89% | Thr(EER): 0.7123
+Precision@EER: 95.13% | Recall@EER: 95.11% | F1@EER: 95.12%
+Best F1: 96.87% | Precision@F1: 96.45% | Recall@F1: 97.29% | Thr(F1): 0.7456
+AUC: 0.9912
+
+=== Plotting curves ===
+ROC curve saved to: eval_results/roc_curves.png
+DET curve saved to: eval_results/det_curves.png
+Precision-Recall curve saved to: eval_results/precision_recall_curves.png
 ```
 
-## 📝 Ví dụ
+**Generated Files:**
+- `eval_results/roc_curves.png`
+- `eval_results/det_curves.png`
+- `eval_results/precision_recall_curves.png`
 
-### Ví dụ 1: Đánh giá Whisper Small cho realtime transcription tiếng Nhật
+## 🛡️ Error Handling
 
+Script xử lý robust với các edge cases:
+
+### 1. Embedding Extraction Failures
 ```python
-lang = "ja"
-type = "realtime"
-model = "whisper-small"
+# Skip nếu:
+- result is None
+- embeddings is None or empty
+- embeddings toàn bằng 0
+- embeddings toàn là NaN
 ```
 
-### Ví dụ 2: Đánh giá SenseVoice Small cho upload transcription tiếng Anh
-
+### 2. Score Computation Failures
 ```python
-lang = "en"
-type = "upload"
-model = "sensevoice-small"
+# Skip trial nếu:
+- File không có trong cache
+- Embedding type không tồn tại
+- Embedding là None
+- Embedding toàn 0 hoặc NaN
+- Cosine score là NaN hoặc inf
 ```
 
-## 📄 Format file
-
-### ground_truth_full.txt
-File chứa transcript chính xác (ground truth), mỗi dòng là một đoạn hoặc toàn bộ transcript.
-
-**Ví dụ:**
-```
-これはテストです。
-音声認識の精度を評価します。
-```
-
-### predict_full.txt
-File chứa kết quả dự đoán từ model, format tương tự ground_truth_full.txt.
-
-**Ví dụ:**
-```
-これはテストです。
-音声認識の精度を評価します。
+### 3. Metrics Calculation
+```python
+# Return None nếu:
+- Không có valid trials
+- zero_division=0 trong precision_recall_fscore_support
 ```
 
 ## 🔍 Giải thích kết quả
 
-### WER và CER thấp (< 0.1)
-- ✅ Chất lượng transcription rất tốt
-- Hầu hết các từ/ky tự được nhận diện chính xác
+### EER thấp (< 5%)
+- ✅ Chất lượng speaker verification xuất sắc
+- System phân biệt speakers rất chính xác
 
-### WER và CER trung bình (0.1 - 0.3)
-- ⚠️ Chất lượng transcription ở mức chấp nhận được
-- Có một số lỗi nhưng vẫn có thể sử dụng được
+### EER trung bình (5% - 10%)
+- ⚠️ Chất lượng ở mức chấp nhận được
+- Có thể cần fine-tune threshold
 
-### WER và CER cao (> 0.3)
-- ❌ Chất lượng transcription kém
-- Nhiều lỗi, cần cải thiện model hoặc cấu hình
+### EER cao (> 10%)
+- ❌ Chất lượng kém
+- Cần cải thiện model hoặc features
 
-## 💡 Tips
+### F1 Score
+- **Best F1 > 95%**: Xuất sắc
+- **Best F1 = 90-95%**: Tốt
+- **Best F1 < 90%**: Cần cải thiện
 
-1. **So sánh models**: Chạy script với các model khác nhau để so sánh hiệu suất
-2. **So sánh realtime vs upload**: So sánh cùng một model nhưng khác loại (realtime vs upload)
-3. **Đa ngôn ngữ**: Test trên nhiều ngôn ngữ để đánh giá khả năng đa ngôn ngữ
-4. **Full transcript**: Sử dụng `predict_full.txt` thay vì `predict.txt` để đánh giá toàn bộ transcript (không chỉ segments)
+### AUC Score
+- **AUC > 0.95**: Xuất sắc
+- **AUC = 0.90-0.95**: Tốt
+- **AUC = 0.80-0.90**: Trung bình
+- **AUC < 0.80**: Kém
 
-## 🔗 Tham khảo
+## ⚡ Optimization Features
 
+### 1. Single Embedding Extraction
+Extract embeddings **chỉ 1 lần** cho mỗi file:
+```python
+# Extract cả 2 loại embeddings cùng lúc
+result, _, _ = pipeline._extract_embeddings(file_path, max_speakers=1)
+emb_cache[file_path] = {
+    "pyannote": result["pyannote_embeddings"][0],
+    "speechbrain": result["speechbrain_embeddings"][0]
+}
+```
+
+### 2. Efficient Trial Processing
+```python
+# Chỉ extract unique files
+all_files = set()
+for p1, p2, _ in trials:
+    all_files.add(p1)
+    all_files.add(p2)
+```
+
+### 3. Progress Tracking
+```python
+# Progress bar cho embedding extraction
+for fpath in tqdm(list(all_files), desc="Extracting embeddings"):
+    ...
+```
+
+---
+
+# 💡 Tips & Best Practices
+
+## ASR Evaluation
+1. **Checkpoint regularly**: Script tự động save checkpoint, đừng xóa file
+2. **VAD filtering**: Test cả 2 modes (with/without VAD)
+3. **RTF analysis**: Monitor RTF để đảm bảo realtime performance
+4. **Batch processing**: Sử dụng batch cho API-based models (Gemini, VLLM)
+5. **Error handling**: Script có retry mechanism cho API calls
+
+## Diarization Evaluation
+1. **Dataset quality**: Đảm bảo audio quality tốt và speakers đủ diverse
+2. **Trial balance**: Cân bằng số genuine và impostor pairs
+3. **Threshold selection**: 
+   - Dùng threshold tại EER cho balanced performance
+   - Dùng threshold tại Best F1 cho maximum accuracy
+4. **Visualization**: Xem curves để understand model behavior
+5. **Embedding comparison**: So sánh Pyannote vs SpeechBrain để chọn best model
+
+---
+
+# 🔗 Tham khảo
+
+## ASR
 - [jiwer documentation](https://github.com/jitsi/jiwer)
+- [Faster Whisper](https://github.com/guillaumekln/faster-whisper)
+- [FunASR](https://github.com/alibaba-damo-academy/FunASR)
 - [WER explanation](https://en.wikipedia.org/wiki/Word_error_rate)
-- [CER explanation](https://en.wikipedia.org/wiki/Character_error_rate)
 
+## Speaker Verification
+- [scikit-learn metrics](https://scikit-learn.org/stable/modules/model_evaluation.html)
+- [ROC Curve](https://en.wikipedia.org/wiki/Receiver_operating_characteristic)
+- [DET Curve](https://en.wikipedia.org/wiki/Detection_error_tradeoff)
+- [EER explanation](https://www.sciencedirect.com/topics/computer-science/equal-error-rate)
+
+## Models
+- [Pyannote Audio](https://github.com/pyannote/pyannote-audio)
+- [SpeechBrain](https://github.com/speechbrain/speechbrain)
+- [Google Gemini](https://ai.google.dev/)
+- [vLLM](https://github.com/vllm-project/vllm)
