@@ -56,6 +56,9 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
                  similarity_threshold=0.7,  # threshold để match speaker
                  embedding_update_weight=0.3,  # trọng số cập nhật embedding mới
                  min_similarity_gap=0.3,  # gap tối thiểu để match (nếu nổi bật)
+                 skip_update_short_audio=True,  # bật/tắt skip update cho audio ngắn
+                 min_duration_for_update=2.0,  # duration tối thiểu (giây) để update embedding
+                 init_similarity_threshold=0.4,  # threshold thấp hơn cho chunk thứ 2 sau init
                  *args, **kwargs):
         super().__init__(
             segmentation={"checkpoint": model_name, "subfolder": "segmentation"},
@@ -72,6 +75,9 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
         self.embedding_update_weight = embedding_update_weight
         self.min_similarity_gap = min_similarity_gap  # Gap threshold cho distinctive matching
         self.max_cluster_size = 20  # Giới hạn số embeddings trong cluster
+        self.skip_update_short_audio = skip_update_short_audio  # Skip update nếu audio quá ngắn
+        self.min_duration_for_update = min_duration_for_update  # Duration tối thiểu để update
+        self.init_similarity_threshold = init_similarity_threshold  # Threshold cho chunk thứ 2 sau init
     
     def _get_session_data(self, session_id: Optional[str] = None) -> Dict:
         """
@@ -174,7 +180,8 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
     def _match_speakers_with_memory(self, new_embeddings: np.ndarray, 
                                     new_labels: List[str],
                                     max_speakers: Optional[int] = None,
-                                    session_id: Optional[str] = None) -> Dict[str, str]:
+                                    session_id: Optional[str] = None,
+                                    audio_duration: Optional[float] = None) -> Dict[str, str]:
         """
         Match speakers mới với speakers đã biết trong memory
         Sử dụng 2-tier matching: EMA embedding (fast) và cluster centroid (robust)
@@ -189,6 +196,8 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
             Maximum number of speakers allowed. If reached, force-assign to best match.
         session_id : str, optional
             Session ID to use. If None, uses current session.
+        audio_duration : float, optional
+            Duration of the audio chunk in seconds. Used to determine if embedding should be updated.
             
         Returns
         -------
@@ -199,6 +208,21 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
         speaker_memory = session_data['speaker_memory']
         speaker_embedding_clusters = session_data['speaker_embedding_clusters']
         speaker_counts = session_data['speaker_counts']
+        
+        # Kiểm tra xem có nên update embedding hay không dựa vào duration
+        should_update_embedding = True
+        if self.skip_update_short_audio and audio_duration is not None:
+            if audio_duration < self.min_duration_for_update:
+                should_update_embedding = False
+                print(f"⏱️  Audio duration ({audio_duration:.2f}s) < {self.min_duration_for_update}s. "
+                      f"Skipping embedding update (matching only).")
+        
+        # Kiểm tra xem có phải chunk thứ 2 sau init không (áp dụng threshold thấp hơn)
+        is_second_chunk_after_init = (session_data['total_chunks_processed'] == 1)
+        effective_threshold = self.init_similarity_threshold if is_second_chunk_after_init else self.similarity_threshold
+        
+        if is_second_chunk_after_init:
+            print(f"🎯 Second chunk after init - using lower threshold: {effective_threshold:.2f} (normal: {self.similarity_threshold:.2f})")
         
         if len(speaker_memory) == 0:
             # Chưa có speaker nào trong memory
@@ -219,7 +243,7 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
         # Có speakers trong memory - tính similarity
         memory_speaker_ids = list(speaker_memory.keys())
         memory_embeddings = np.array([speaker_memory[sid] for sid in memory_speaker_ids])
-        
+
         # Tính cosine similarity hoặc euclidean distance
         if self._embedding.metric == "cosine":
             # Cosine similarity (1 - cosine distance)
@@ -251,13 +275,13 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
             print(f"  Best EMA similarity: {best_similarity_ema:.3f} with {best_speaker_id}")
             print(f"  Second best similarity: {second_best_similarity_ema:.3f}")
             print(f"  Gap: {similarity_gap_ema:.3f}")
-            print(f"  Threshold: {self.similarity_threshold}")
+            print(f"  Threshold: {effective_threshold}")
             
             matched_speaker_id = None
             
             # Check matching conditions
             if best_speaker_id not in used_memory_speakers:
-                if best_similarity_ema >= self.similarity_threshold:
+                if best_similarity_ema >= effective_threshold:
                     # Match via threshold
                     matched_speaker_id = best_speaker_id
                     print(f"  ✅ Matched via EMA (threshold)!")
@@ -315,7 +339,7 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
                     print(f"  [TIER 2] Best: {best_cluster_similarity:.3f}, Second: {second_best_cluster_similarity:.3f}, Gap: {cluster_similarity_gap:.3f}")
                     
                     # Check matching conditions for cluster
-                    if best_cluster_similarity >= self.similarity_threshold:
+                    if best_cluster_similarity >= effective_threshold:
                         matched_speaker_id = best_cluster_speaker_id
                         print(f"  ✅ Matched via cluster centroid (threshold) with {matched_speaker_id}!")
                     elif cluster_similarity_gap > self.min_similarity_gap and second_best_cluster_similarity > 0:
@@ -328,24 +352,29 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
                 mapping[label] = matched_speaker_id
                 used_memory_speakers.add(matched_speaker_id)
                 
-                # Cập nhật EMA embedding
-                old_embedding = speaker_memory[matched_speaker_id]
-                updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
-                                   self.embedding_update_weight * new_embedding
-                # Normalize nếu dùng cosine similarity
-                if self._embedding.metric == "cosine":
-                    updated_embedding = updated_embedding / np.linalg.norm(updated_embedding)
-                speaker_memory[matched_speaker_id] = updated_embedding
-                
-                # Add vào cluster (với limit size)
-                cluster = speaker_embedding_clusters[matched_speaker_id]
-                cluster.append(new_embedding.copy())
-                # Keep only recent embeddings
-                if len(cluster) > self.max_cluster_size:
-                    speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
-                
-                speaker_counts[matched_speaker_id] += 1
-                print(f"  📊 Updated: EMA + added to cluster (size: {len(speaker_embedding_clusters[matched_speaker_id])})")
+                # Cập nhật EMA embedding (chỉ khi should_update_embedding = True)
+                if should_update_embedding:
+                    old_embedding = speaker_memory[matched_speaker_id]
+                    updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
+                                       self.embedding_update_weight * new_embedding
+                    # Normalize nếu dùng cosine similarity
+                    if self._embedding.metric == "cosine":
+                        updated_embedding = updated_embedding / np.linalg.norm(updated_embedding)
+                    speaker_memory[matched_speaker_id] = updated_embedding
+                    
+                    # Add vào cluster (với limit size)
+                    cluster = speaker_embedding_clusters[matched_speaker_id]
+                    cluster.append(new_embedding.copy())
+                    # Keep only recent embeddings
+                    if len(cluster) > self.max_cluster_size:
+                        speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
+                    
+                    speaker_counts[matched_speaker_id] += 1
+                    print(f"  📊 Updated: EMA + added to cluster (size: {len(speaker_embedding_clusters[matched_speaker_id])})")
+                else:
+                    # Chỉ count mà không update embedding
+                    speaker_counts[matched_speaker_id] += 1
+                    print(f"  📊 Matched but skipped update (short audio)")
                 
             else:
                 # Không match được - check max_speakers constraint
@@ -396,21 +425,26 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
                         
                         print(f"  🔀 Force-assigned to {matched_speaker_id} (similarity: {best_overall_similarity:.3f})")
                         
-                        # Update như bình thường
-                        old_embedding = speaker_memory[matched_speaker_id]
-                        updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
-                                           self.embedding_update_weight * new_embedding
-                        if self._embedding.metric == "cosine":
-                            updated_embedding = updated_embedding / np.linalg.norm(updated_embedding)
-                        speaker_memory[matched_speaker_id] = updated_embedding
-                        
-                        cluster = speaker_embedding_clusters[matched_speaker_id]
-                        cluster.append(new_embedding.copy())
-                        if len(cluster) > self.max_cluster_size:
-                            speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
-                        
-                        speaker_counts[matched_speaker_id] += 1
-                        print(f"  📊 Updated: EMA + added to cluster (size: {len(speaker_embedding_clusters[matched_speaker_id])})")
+                        # Update như bình thường (chỉ khi should_update_embedding = True)
+                        if should_update_embedding:
+                            old_embedding = speaker_memory[matched_speaker_id]
+                            updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
+                                               self.embedding_update_weight * new_embedding
+                            if self._embedding.metric == "cosine":
+                                updated_embedding = updated_embedding / np.linalg.norm(updated_embedding)
+                            speaker_memory[matched_speaker_id] = updated_embedding
+                            
+                            cluster = speaker_embedding_clusters[matched_speaker_id]
+                            cluster.append(new_embedding.copy())
+                            if len(cluster) > self.max_cluster_size:
+                                speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
+                            
+                            speaker_counts[matched_speaker_id] += 1
+                            print(f"  📊 Updated: EMA + added to cluster (size: {len(speaker_embedding_clusters[matched_speaker_id])})")
+                        else:
+                            # Chỉ count mà không update embedding
+                            speaker_counts[matched_speaker_id] += 1
+                            print(f"  📊 Force-assigned but skipped update (short audio)")
                     else:
                         # Fallback: assign to first speaker (shouldn't happen)
                         fallback_speaker_id = memory_speaker_ids[0]
@@ -473,10 +507,44 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
         
         # Extract embeddings và labels từ output
         current_embeddings = output.speaker_embeddings  # (num_speakers, dimension)
+        # print(f"current_embeddings: {current_embeddings}")
         current_labels = list(output.speaker_diarization.labels())
         
         if len(current_labels) == 0:
             return output
+        
+        # Check if embeddings are valid (not all NaN or zero)
+        if current_embeddings is not None:
+            has_valid_embedding = False
+            for i, emb in enumerate(current_embeddings):
+                if not np.any(np.isnan(emb)) and np.linalg.norm(emb) > 0:
+                    has_valid_embedding = True
+                    break
+            
+            if not has_valid_embedding:
+                print(f"⚠️  All embeddings are invalid (NaN or zero).")
+                print(f"⚠️  This usually happens with very short audio or no clear speech detected.")
+
+                label_mapping = {label: "SPEAKER_UNK" for label in current_labels}
+                diarization = output.speaker_diarization.rename_labels(mapping=label_mapping)
+                exclusive_diarization = output.exclusive_speaker_diarization.rename_labels(mapping=label_mapping)
+                return DiarizeOutput(
+                    speaker_diarization=diarization,
+                    exclusive_speaker_diarization=exclusive_diarization,
+                    speaker_embeddings=current_embeddings
+                )
+        
+        # Tính audio duration
+        audio_duration = None
+        try:
+            if isinstance(audio_file, dict):
+                audio_info = sf.info(audio_file['audio'])
+            else:
+                audio_info = sf.info(audio_file)
+            audio_duration = audio_info.duration
+            print(f"duration: {audio_duration:.2f}s")
+        except Exception as e:
+            print(f"⚠️  Could not read audio duration: {e}; audio_file: {audio_file}")
         
         # Get session data
         session_data = self._get_session_data()
@@ -503,11 +571,12 @@ class RealtimeSpeakerDiarization(SpeakerDiarization):
         else:
             print(f"Current labels: {current_labels}")
         
-        # Match với speakers trong memory (pass max_speakers constraint)
+        # Match với speakers trong memory (pass max_speakers constraint và audio_duration)
         label_mapping = self._match_speakers_with_memory(
             current_embeddings, 
             current_labels,
-            max_speakers=max_speakers
+            max_speakers=max_speakers,
+            audio_duration=audio_duration
         )
         print(f"Label mapping: {label_mapping}")
         
@@ -619,7 +688,10 @@ if __name__ == "__main__":
         token=os.getenv("HF_TOKEN"),
         similarity_threshold=0.7,  # threshold để match speaker (càng cao càng strict)
         embedding_update_weight=0.3,  # trọng số update embedding (0.3 = 30% mới, 70% cũ)
-        min_similarity_gap=0.3  # gap tối thiểu để match nếu nổi bật hơn hẳn
+        min_similarity_gap=0.3,  # gap tối thiểu để match nếu nổi bật hơn hẳn
+        skip_update_short_audio=True,  # bật tính năng skip update cho audio ngắn
+        min_duration_for_update=2.0,  # chỉ update embedding nếu audio >= 2s
+        init_similarity_threshold=0.4  # threshold thấp hơn cho chunk thứ 2 sau init
     )
 
     # Send pipeline to GPU (when available)

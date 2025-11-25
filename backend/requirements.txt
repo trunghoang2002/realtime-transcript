@@ -8,6 +8,10 @@ requests==2.32.5
 jiwer==4.0.0
 python-multipart==0.0.20
 pyannote.audio==4.0.2
+SudachiPy==0.6.10
+sudachidict_core
+regex
 git+https://github.com/speechbrain/speechbrain.git@develop
-# modal==1.2.2 # for hosting on modal
+# modal==1.2.4 # for hosting on modal
 # openai==2.8.1 # for using openai api
+# google-genai==1.52.0 # for using google genai api

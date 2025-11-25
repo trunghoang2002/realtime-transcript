@@ -86,7 +86,10 @@ diarization_model = RealtimeSpeakerDiarization(
     token=os.getenv("HF_TOKEN"),
     similarity_threshold=0.6,  # threshold để match speaker (càng cao càng strict)
     embedding_update_weight=0.3,  # trọng số update embedding (0.3 = 30% mới, 70% cũ)
-    min_similarity_gap=0.25  # gap tối thiểu để match nếu nổi bật hơn hẳn
+    min_similarity_gap=0.25,  # gap tối thiểu để match nếu nổi bật hơn hẳn
+    skip_update_short_audio=True,
+    min_duration_for_update=2.0,
+    init_similarity_threshold=0.3
 )
 if DEVICE == "cuda":
     diarization_model.to(torch.device("cuda"))

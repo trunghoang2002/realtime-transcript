@@ -41,7 +41,7 @@ VLLM_PORT = 8000
     },
 )
 @modal.concurrent(  # how many requests can one replica handle? tune carefully!
-    max_inputs=32
+    max_inputs=1
 )
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)
 def serve():
@@ -57,8 +57,12 @@ def serve():
         "llm",
         "--gpu-memory-utilization",
         "0.95",
+        "--tensor-parallel-size",
+        "1",
         "--max-model-len",
-        "1k",
+        "8192",
+        "--max-num-seqs",
+        "1",
         "--host",
         "0.0.0.0",
         "--port",

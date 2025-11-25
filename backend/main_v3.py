@@ -82,7 +82,10 @@ diarization_model = RealtimeSpeakerDiarization(
     model_name="speechbrain/spkrec-ecapa-voxceleb",
     similarity_threshold=0.6,
     embedding_update_weight=0.3,
-    min_similarity_gap=0.25
+    min_similarity_gap=0.25,
+    skip_update_short_audio=True,
+    min_duration_for_update=2.0,
+    init_similarity_threshold=0.3
 )
 
 def pad_audio_for_embedding(audio_f32: np.ndarray, min_audio_length = 8000) -> np.ndarray:

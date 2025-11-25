@@ -69,6 +69,9 @@ class RealtimeSpeakerDiarization:
                  similarity_threshold=0.7,
                  embedding_update_weight=0.3,
                  min_similarity_gap=0.3,
+                 skip_update_short_audio=True,  # bật/tắt skip update cho audio ngắn
+                 min_duration_for_update=2.0,  # duration tối thiểu (giây) để update embedding
+                 init_similarity_threshold=0.4,  # threshold thấp hơn cho chunk thứ 2 sau init
                  use_pyannote=True,  # Enable/disable Pyannote
                  use_speechbrain=True,  # Enable/disable SpeechBrain
                  *args, **kwargs):
@@ -114,7 +117,10 @@ class RealtimeSpeakerDiarization:
         shared_params = {
             'similarity_threshold': similarity_threshold,
             'embedding_update_weight': embedding_update_weight,
-            'min_similarity_gap': min_similarity_gap
+            'min_similarity_gap': min_similarity_gap,
+            'skip_update_short_audio': skip_update_short_audio,
+            'min_duration_for_update': min_duration_for_update,
+            'init_similarity_threshold': init_similarity_threshold
         }
         
         # Initialize both diarization systems
@@ -155,6 +161,9 @@ class RealtimeSpeakerDiarization:
         self.min_similarity_gap = min_similarity_gap
         self.max_cluster_size = 20
         self.embedding_metric = "cosine"
+        self.skip_update_short_audio = skip_update_short_audio  # Skip update nếu audio quá ngắn
+        self.min_duration_for_update = min_duration_for_update  # Duration tối thiểu để update
+        self.init_similarity_threshold = init_similarity_threshold  # Threshold cho chunk thứ 2 sau init
     
     def _get_session_data(self, session_id: Optional[str] = None) -> Dict:
         """
@@ -491,6 +500,7 @@ class RealtimeSpeakerDiarization:
         }
         
         # Extract from Pyannote
+        pyannote_output = None
         if self.use_pyannote and self.pyannote_diarizer:
             try:
                 if isinstance(file_or_audio_f32, np.ndarray):
@@ -511,11 +521,12 @@ class RealtimeSpeakerDiarization:
                 if pyannote_output.speaker_embeddings is not None:
                     result['pyannote_embeddings'] = pyannote_output.speaker_embeddings
                     result['pyannote_labels'] = list(pyannote_output.speaker_diarization.labels())
-                    print(f"[Pyannote] Extracted {len(result['pyannote_labels'])} speakers")
+                    print(f"[Pyannote] Extracted {len(result['pyannote_labels'])} speakers: {result['pyannote_labels']}")
             except Exception as e:
                 print(f"⚠️  Pyannote extraction failed: {e}")
         
         # Extract from SpeechBrain
+        speechbrain_output = None
         if self.use_speechbrain and self.speechbrain_diarizer:
             try:
                 speechbrain_output = self.speechbrain_diarizer(
@@ -526,22 +537,38 @@ class RealtimeSpeakerDiarization:
                 if speechbrain_output.get('speaker_embeddings') is not None:
                     result['speechbrain_embeddings'] = speechbrain_output['speaker_embeddings']
                     result['speechbrain_labels'] = speechbrain_output.get('speaker_labels', ['SPEAKER_00'])
-                    print(f"[SpeechBrain] Extracted {len(result['speechbrain_labels'])} speakers")
+                    print(f"[SpeechBrain] Extracted {len(result['speechbrain_labels'])} speakers: {result['speechbrain_labels']}")
             except Exception as e:
                 print(f"⚠️  SpeechBrain extraction failed: {e}")
         
-        return result
+        return result, pyannote_output, speechbrain_output
     
     def _match_speakers_with_memory(self, 
                                    new_embeddings_pyannote: Optional[np.ndarray],
                                    new_embeddings_speechbrain: Optional[np.ndarray],
                                    new_labels: List[str],
                                    max_speakers: Optional[int] = None,
-                                   session_id: Optional[str] = None) -> Dict[str, str]:
+                                   session_id: Optional[str] = None,
+                                   audio_duration: Optional[float] = None) -> Dict[str, str]:
         """
         Match speakers with memory using fused embeddings
         
         Similar to individual systems but uses fused embeddings for matching
+        
+        Parameters
+        ----------
+        new_embeddings_pyannote : np.ndarray
+            New Pyannote embeddings
+        new_embeddings_speechbrain : np.ndarray
+            New SpeechBrain embeddings
+        new_labels : List[str]
+            New labels
+        max_speakers : int, optional
+            Maximum number of speakers to extract
+        session_id : str, optional
+            Session ID to use. If None, uses current session.
+        audio_duration : float, optional
+            Duration of the audio chunk in seconds. Used to determine if embedding should be updated.
         """
         session_data = self._get_session_data(session_id)
         speaker_memory = session_data['speaker_memory']
@@ -549,6 +576,22 @@ class RealtimeSpeakerDiarization:
         speaker_counts = session_data['speaker_counts']
         pyannote_memory = session_data['pyannote_memory']
         speechbrain_memory = session_data['speechbrain_memory']
+        
+        # Kiểm tra xem có nên update embedding hay không dựa vào duration
+        should_update_embedding = True
+        if self.skip_update_short_audio and audio_duration is not None:
+            if audio_duration < self.min_duration_for_update:
+                should_update_embedding = False
+                print(f"⏱️  Audio duration ({audio_duration:.2f}s) < {self.min_duration_for_update}s. "
+                      f"Skipping embedding update (matching only).")
+        
+        # Kiểm tra xem có phải chunk thứ 2 sau init không (áp dụng threshold thấp hơn)
+        is_second_chunk_after_init = (session_data['total_chunks_processed'] == 1)
+        effective_threshold = self.init_similarity_threshold if is_second_chunk_after_init else self.similarity_threshold
+        
+        if is_second_chunk_after_init:
+            print(f"🎯 Second chunk after init - using lower threshold: {effective_threshold:.2f} (normal: {self.similarity_threshold:.2f})")
+        
         # Fuse new embeddings
         num_speakers = len(new_labels)
         fused_new_embeddings = []
@@ -695,12 +738,13 @@ class RealtimeSpeakerDiarization:
             print(f"\n[Fusion] Label: {label}")
             print(f"  Best similarity: {best_similarity_ema:.3f} with {best_speaker_id}")
             print(f"  Gap: {similarity_gap_ema:.3f}")
+            print(f"  Threshold: {effective_threshold}")
             
             matched_speaker_id = None
             
             # Check matching conditions
             if best_speaker_id not in used_memory_speakers:
-                if best_similarity_ema >= self.similarity_threshold:
+                if best_similarity_ema >= effective_threshold:
                     matched_speaker_id = best_speaker_id
                     print(f"  ✅ Matched via threshold!")
                 elif similarity_gap_ema > self.min_similarity_gap and second_best_similarity_ema > 0:
@@ -712,50 +756,55 @@ class RealtimeSpeakerDiarization:
                 mapping[label] = matched_speaker_id
                 used_memory_speakers.add(matched_speaker_id)
                 
-                # Update EMA embedding
-                old_embedding = speaker_memory[matched_speaker_id]
-                updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
-                                   self.embedding_update_weight * new_embedding
-                if self.embedding_metric == "cosine":
-                    updated_embedding = self._normalize_embedding(updated_embedding)
-                speaker_memory[matched_speaker_id] = updated_embedding
-                
-                # For score-level fusion, also update individual embeddings
-                if self.fusion_method == "score_level":
-                    # Update Pyannote embedding
-                    if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
-                        pyannote_emb_new = new_embeddings_pyannote[i]
-                        if matched_speaker_id in pyannote_memory:
-                            old_pyannote = pyannote_memory[matched_speaker_id]
-                            updated_pyannote = (1 - self.embedding_update_weight) * old_pyannote + \
-                                             self.embedding_update_weight * pyannote_emb_new
-                            if self.embedding_metric == "cosine":
-                                updated_pyannote = self._normalize_embedding(updated_pyannote)
-                            pyannote_memory[matched_speaker_id] = updated_pyannote
-                        else:
-                            pyannote_memory[matched_speaker_id] = pyannote_emb_new.copy()
+                # Update EMA embedding (chỉ khi should_update_embedding = True)
+                if should_update_embedding:
+                    old_embedding = speaker_memory[matched_speaker_id]
+                    updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
+                                       self.embedding_update_weight * new_embedding
+                    if self.embedding_metric == "cosine":
+                        updated_embedding = self._normalize_embedding(updated_embedding)
+                    speaker_memory[matched_speaker_id] = updated_embedding
                     
-                    # Update SpeechBrain embedding
-                    if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
-                        speechbrain_emb_new = new_embeddings_speechbrain[i]
-                        if matched_speaker_id in speechbrain_memory:
-                            old_speechbrain = speechbrain_memory[matched_speaker_id]
-                            updated_speechbrain = (1 - self.embedding_update_weight) * old_speechbrain + \
-                                                self.embedding_update_weight * speechbrain_emb_new
-                            if self.embedding_metric == "cosine":
-                                updated_speechbrain = self._normalize_embedding(updated_speechbrain)
-                            speechbrain_memory[matched_speaker_id] = updated_speechbrain
-                        else:
-                            speechbrain_memory[matched_speaker_id] = speechbrain_emb_new.copy()
-                
-                # Add to cluster
-                cluster = speaker_embedding_clusters[matched_speaker_id]
-                cluster.append(new_embedding.copy())
-                if len(cluster) > self.max_cluster_size:
-                    speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
-                
-                speaker_counts[matched_speaker_id] += 1
-                print(f"  📊 Updated speaker {matched_speaker_id}")
+                    # For score-level fusion, also update individual embeddings
+                    if self.fusion_method == "score_level":
+                        # Update Pyannote embedding
+                        if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
+                            pyannote_emb_new = new_embeddings_pyannote[i]
+                            if matched_speaker_id in pyannote_memory:
+                                old_pyannote = pyannote_memory[matched_speaker_id]
+                                updated_pyannote = (1 - self.embedding_update_weight) * old_pyannote + \
+                                                 self.embedding_update_weight * pyannote_emb_new
+                                if self.embedding_metric == "cosine":
+                                    updated_pyannote = self._normalize_embedding(updated_pyannote)
+                                pyannote_memory[matched_speaker_id] = updated_pyannote
+                            else:
+                                pyannote_memory[matched_speaker_id] = pyannote_emb_new.copy()
+                        
+                        # Update SpeechBrain embedding
+                        if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
+                            speechbrain_emb_new = new_embeddings_speechbrain[i]
+                            if matched_speaker_id in speechbrain_memory:
+                                old_speechbrain = speechbrain_memory[matched_speaker_id]
+                                updated_speechbrain = (1 - self.embedding_update_weight) * old_speechbrain + \
+                                                    self.embedding_update_weight * speechbrain_emb_new
+                                if self.embedding_metric == "cosine":
+                                    updated_speechbrain = self._normalize_embedding(updated_speechbrain)
+                                speechbrain_memory[matched_speaker_id] = updated_speechbrain
+                            else:
+                                speechbrain_memory[matched_speaker_id] = speechbrain_emb_new.copy()
+                    
+                    # Add to cluster
+                    cluster = speaker_embedding_clusters[matched_speaker_id]
+                    cluster.append(new_embedding.copy())
+                    if len(cluster) > self.max_cluster_size:
+                        speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
+                    
+                    speaker_counts[matched_speaker_id] += 1
+                    print(f"  📊 Updated speaker {matched_speaker_id}")
+                else:
+                    # Chỉ count mà không update embedding
+                    speaker_counts[matched_speaker_id] += 1
+                    print(f"  📊 Matched but skipped update (short audio)")
                 
             else:
                 # Check max_speakers constraint
@@ -779,46 +828,51 @@ class RealtimeSpeakerDiarization:
                     
                     print(f"  🔀 Force-assigned to {matched_speaker_id}")
                     
-                    # Update as normal
-                    old_embedding = speaker_memory[matched_speaker_id]
-                    updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
-                                       self.embedding_update_weight * new_embedding
-                    if self.embedding_metric == "cosine":
-                        updated_embedding = self._normalize_embedding(updated_embedding)
-                    speaker_memory[matched_speaker_id] = updated_embedding
-                    
-                    # For score-level fusion, also update individual embeddings
-                    if self.fusion_method == "score_level":
-                        if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
-                            pyannote_emb_new = new_embeddings_pyannote[i]
-                            if matched_speaker_id in pyannote_memory:
-                                old_pyannote = pyannote_memory[matched_speaker_id]
-                                updated_pyannote = (1 - self.embedding_update_weight) * old_pyannote + \
-                                                 self.embedding_update_weight * pyannote_emb_new
-                                if self.embedding_metric == "cosine":
-                                    updated_pyannote = self._normalize_embedding(updated_pyannote)
-                                pyannote_memory[matched_speaker_id] = updated_pyannote
-                            else:
-                                pyannote_memory[matched_speaker_id] = pyannote_emb_new.copy()
+                    # Update as normal (chỉ khi should_update_embedding = True)
+                    if should_update_embedding:
+                        old_embedding = speaker_memory[matched_speaker_id]
+                        updated_embedding = (1 - self.embedding_update_weight) * old_embedding + \
+                                           self.embedding_update_weight * new_embedding
+                        if self.embedding_metric == "cosine":
+                            updated_embedding = self._normalize_embedding(updated_embedding)
+                        speaker_memory[matched_speaker_id] = updated_embedding
                         
-                        if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
-                            speechbrain_emb_new = new_embeddings_speechbrain[i]
-                            if matched_speaker_id in speechbrain_memory:
-                                old_speechbrain = speechbrain_memory[matched_speaker_id]
-                                updated_speechbrain = (1 - self.embedding_update_weight) * old_speechbrain + \
-                                                    self.embedding_update_weight * speechbrain_emb_new
-                                if self.embedding_metric == "cosine":
-                                    updated_speechbrain = self._normalize_embedding(updated_speechbrain)
-                                speechbrain_memory[matched_speaker_id] = updated_speechbrain
-                            else:
-                                speechbrain_memory[matched_speaker_id] = speechbrain_emb_new.copy()
-                    
-                    cluster = speaker_embedding_clusters[matched_speaker_id]
-                    cluster.append(new_embedding.copy())
-                    if len(cluster) > self.max_cluster_size:
-                        speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
-                    
-                    speaker_counts[matched_speaker_id] += 1
+                        # For score-level fusion, also update individual embeddings
+                        if self.fusion_method == "score_level":
+                            if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
+                                pyannote_emb_new = new_embeddings_pyannote[i]
+                                if matched_speaker_id in pyannote_memory:
+                                    old_pyannote = pyannote_memory[matched_speaker_id]
+                                    updated_pyannote = (1 - self.embedding_update_weight) * old_pyannote + \
+                                                     self.embedding_update_weight * pyannote_emb_new
+                                    if self.embedding_metric == "cosine":
+                                        updated_pyannote = self._normalize_embedding(updated_pyannote)
+                                    pyannote_memory[matched_speaker_id] = updated_pyannote
+                                else:
+                                    pyannote_memory[matched_speaker_id] = pyannote_emb_new.copy()
+                            
+                            if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
+                                speechbrain_emb_new = new_embeddings_speechbrain[i]
+                                if matched_speaker_id in speechbrain_memory:
+                                    old_speechbrain = speechbrain_memory[matched_speaker_id]
+                                    updated_speechbrain = (1 - self.embedding_update_weight) * old_speechbrain + \
+                                                        self.embedding_update_weight * speechbrain_emb_new
+                                    if self.embedding_metric == "cosine":
+                                        updated_speechbrain = self._normalize_embedding(updated_speechbrain)
+                                    speechbrain_memory[matched_speaker_id] = updated_speechbrain
+                                else:
+                                    speechbrain_memory[matched_speaker_id] = speechbrain_emb_new.copy()
+                        
+                        cluster = speaker_embedding_clusters[matched_speaker_id]
+                        cluster.append(new_embedding.copy())
+                        if len(cluster) > self.max_cluster_size:
+                            speaker_embedding_clusters[matched_speaker_id] = cluster[-self.max_cluster_size:]
+                        
+                        speaker_counts[matched_speaker_id] += 1
+                    else:
+                        # Chỉ count mà không update embedding
+                        speaker_counts[matched_speaker_id] += 1
+                        print(f"  📊 Force-assigned but skipped update (short audio)")
                 else:
                     # Create new speaker
                     next_id = session_data['next_speaker_id']
@@ -871,13 +925,53 @@ class RealtimeSpeakerDiarization:
         elif use_memory and self.current_session_id is None:
             raise ValueError("No session_id provided and no current session set. "
                            "Call set_session() or provide session_id parameter.")
+        
+        # Tính audio duration
+        audio_duration = None
+        try:
+            if isinstance(file_or_audio_f32, dict):
+                audio_info = sf.info(file_or_audio_f32['audio'])
+                audio_duration = audio_info.duration
+            elif isinstance(file_or_audio_f32, str):
+                audio_info = sf.info(file_or_audio_f32)
+                audio_duration = audio_info.duration
+            elif isinstance(file_or_audio_f32, np.ndarray):
+                audio_duration = len(file_or_audio_f32) / 16000  # Assuming 16kHz sample rate
+            
+            if audio_duration is not None:
+                print(f"duration: {audio_duration:.2f}s")
+            else:
+                print(f"⚠️  Could not calculate audio duration: {e}; file_or_audio_f32: {file_or_audio_f32}")
+        except Exception as e:
+            print(f"⚠️  Could not calculate audio duration: {e}; file_or_audio_f32: {file_or_audio_f32}")
+        
         # Extract embeddings from both systems
-        extracted = self._extract_embeddings(file_or_audio_f32, max_speakers=max_speakers)
+        extracted, pyannote_output, speechbrain_output = self._extract_embeddings(file_or_audio_f32, max_speakers=max_speakers)
         
         pyannote_embeddings = extracted['pyannote_embeddings']
         speechbrain_embeddings = extracted['speechbrain_embeddings']
         pyannote_labels = extracted['pyannote_labels']
         speechbrain_labels = extracted['speechbrain_labels']
+        
+        # Check if all pyannote labels are SPEAKER_UNK (invalid embeddings)
+        pyannote_all_unknown = False
+        if pyannote_labels:
+            pyannote_all_unknown = all(label == "SPEAKER_UNK" for label in pyannote_labels)
+            if pyannote_all_unknown:
+                print("⚠️  All Pyannote speakers are SPEAKER_UNK (invalid embeddings)")
+                print("✅ Using SpeechBrain results only (skipping fusion)")
+        
+        # If pyannote has all SPEAKER_UNK, use only SpeechBrain
+        if pyannote_all_unknown and speechbrain_labels and self.use_speechbrain and self.speechbrain_diarizer:
+            print("[Fusion] Bypassing fusion - using SpeechBrain only")
+            
+            # Return speechbrain output in fusion format
+            return {
+                'speaker_embeddings': speechbrain_output.get('speaker_embeddings'),
+                'speaker_labels': speechbrain_output.get('speaker_labels', []),
+                'pyannote_embeddings': None,
+                'speechbrain_embeddings': speechbrain_output.get('speaker_embeddings')
+            }
         
         # Determine labels (prefer the system with more speakers or use a consensus)
         if pyannote_labels and speechbrain_labels:
@@ -939,7 +1033,8 @@ class RealtimeSpeakerDiarization:
             pyannote_embeddings,
             speechbrain_embeddings,
             current_labels,
-            max_speakers=max_speakers
+            max_speakers=max_speakers,
+            audio_duration=audio_duration
         )
         
         print(f"[Fusion] Label mapping: {label_mapping}")
@@ -1039,9 +1134,13 @@ if __name__ == "__main__":
     pipeline = RealtimeSpeakerDiarization(
         fusion_method="score_level",
         fusion_alpha=0.4, # trọng số fusion (0-1), final score = fusion_alpha * score_pyannote + (1 - fusion_alpha) * score_speechbrain
+        fusion_weights=[0.5, 0.5], # trọng số cho learned_concat, fusion_embedding = w1 * pyannote_embedding + w2 * speechbrain_embedding
         similarity_threshold=0.7,  # threshold để match speaker (càng cao càng strict)
         embedding_update_weight=0.3,  # trọng số update embedding (0.3 = 30% mới, 70% cũ)
-        min_similarity_gap=0.3  # gap tối thiểu để match nếu nổi bật hơn hẳn
+        min_similarity_gap=0.3,  # gap tối thiểu để match nếu nổi bật hơn hẳn
+        skip_update_short_audio=True,  # bật tính năng skip update cho audio ngắn
+        min_duration_for_update=2.0,  # chỉ update embedding nếu audio >= 2s
+        init_similarity_threshold=0.4  # threshold thấp hơn cho chunk thứ 2 sau init
     )
 
     # Ví dụ 1: Xử lý audio chunk đầu tiên với Session ID
