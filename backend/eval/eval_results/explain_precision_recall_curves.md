@@ -1,138 +1,64 @@
 ![PR Curves](precision_recall_curves.png)
 
-# 1. Ý nghĩa của Precision–Recall Curve
+# 1. Precision–Recall Curve là gì ?
 
-PR curve thể hiện:
-
-* **Precision** = tỉ lệ dự đoán “same speaker” là đúng
-* **Recall** = tỉ lệ nhận diện đúng “same speaker” trong tất cả cùng-speaker
-
-PR rất quan trọng khi:
-
-* Bài toán **bất cân bằng** (same-speaker trials < different-speaker trials)
-* Muốn đánh giá **FP vs FN** một cách chi tiết
-* Quan tâm đến **ngưỡng clustering** trong diarization
+* **Precision**: tỉ lệ dự đoán “same speaker” là đúng.
+* **Recall**: tỉ lệ bắt đúng tất cả cặp same-speaker.
+* PR curve rất quan trọng khi dữ liệu **mất cân bằng** (diff-speaker >> same-speaker) và khi ta muốn kiểm soát trade-off merge vs split trong diarization.
 
 ---
 
-# 2. Nhìn tổng thể đồ thị
+# 2. Tổng quan đồ thị
 
-### ✔ Đường màu đỏ (SpeechBrain) **nằm cao, gần sát Precision=1 trong suốt dải Recall 0.0–0.8**
+| Model             | Màu đường | PR-AUC | Best F1 | Precision@best F1 | Recall@best F1 |
+| ----------------- | --------- | ------ | ------- | ----------------- | -------------- |
+| Pyannote          | Xanh lam  | 0.727  | 65.28   | 68.16             | 62.64          |
+| SpeechBrain ECAPA | Đỏ        | 0.924  | 86.70   | **99.14**         | 77.03          |
+| NeMo Titanet      | Xanh lá   | 0.929  | 87.25   | 97.56             | 78.90          |
+| NeMo ECAPA TDNN   | Vàng      | 0.928  | 87.27   | 97.56             | 78.94          |
 
-→ embedding **cực kỳ mạnh**, hiếm khi nhận nhầm speaker khác (false accept gần bằng 0).
-
-### ✔ Đường màu xanh (Pyannote) nằm thấp hơn đáng kể
-
-→ phân biệt speaker kém hơn
-→ có nhiều false accept và false reject
-→ Precision giảm dần nhanh theo Recall
-
----
-
-# 3. AUC của PR Curve
-
-Đây là diện tích dưới đường Precision–Recall, đặc biệt quan trọng khi:
-
-- dataset bất cân bằng
-- số negative (diff-speaker pairs) rất lớn
-- positive (same-speaker pairs) ít hơn
-
-PR-AUC phản ánh:
-
-- độ ổn định của precision khi tăng recall
-
-- độ mạnh của embedding trong false accept / false reject
-
-Biểu đồ đã ghi rõ:
-
-* **Pyannote AUC = 0.727**
-* **SpeechBrain AUC = 0.924**
-
-→ SpeechBrain vượt trội **~20% absolute**, cực kỳ lớn trong speaker embedding.
+* Ba đường **SpeechBrain + NeMo** bám sát trần Precision≈1 đến khi Recall ~0.8–0.9 → gần như không merge nhầm.
+* **Pyannote** tụt dốc: Precision rơi xuống ~0.7 khi Recall đạt 0.8 → score overlap lớn.
 
 ---
 
-# 4. Best F1 Point (điểm tối ưu nhất về precision–recall)
+# 3. Phân tích từng đường cong
 
-Dấu tròn:
+### 🔵 Pyannote
+* Precision giảm đều khi tăng Recall; vùng Precision>0.9 chỉ tồn tại ở Recall <0.2.
+* Điều này cho thấy false accept tăng rất nhanh, khó duy trì cả precision và recall cao.
 
-### 🔵 Pyannote Best F1:
+### 🟥 SpeechBrain ECAPA
+* Giữ Precision ≈ 1 cho tới khi Recall ~0.8 rồi mới giảm.
+* Tạo “vùng threshold an toàn” rộng: bạn có thể thay đổi ngưỡng khá nhiều mà precision vẫn >0.97.
 
-* F1 = **65.28%**
-* Precision = 68.16%
-* Recall = 62.64%
-
-Phân tích:
-
-* Precision thấp → nhiều false accept
-* Recall thấp → nhiều false reject
-* Biểu đồ màu xanh cho thấy điểm tối ưu cũng chỉ vừa đủ dùng
+### 🟢 NeMo Titanet & 🟡 NeMo ECAPA
+* Hai đường gần như trùng nhau, nằm trên/áp sát đường đỏ ở đoạn cuối.
+* Ở Recall ~0.85 vẫn giữ Precision >0.95 → phù hợp cho cả tasks cần recall cao (speaker search, active learning).
 
 ---
 
-### 🔴 SpeechBrain Best F1:
+# 4. Best F1 points (các chấm tròn)
 
-* F1 = **86.70%**
-* Precision = **99.14%**
-* Recall = 77.03%
-
-Điều này cực kỳ quan trọng:
-
-### ✔ Precision ~ 1.0
-
-→ Khi model nói “same speaker”, **gần như chắc chắn đúng**
-→ Đây là đặc tính cực tốt để dùng trong **clustering** (AHC, VBx)
-
-### ✔ Recall 0.77
-
-→ Chấp nhận bỏ sót (split) nhưng không bao giờ ghép nhầm (merge)
-→ Điều này phù hợp hoàn toàn với bài toán diarization
-(vì merge là lỗi nặng hơn split)
+* **Pyannote**: F1 65.28% (Precision 0.68 / Recall 0.63) → chỉ đủ làm baseline.
+* **SpeechBrain**: F1 86.70% (Precision 0.99 / Recall 0.77) → lý tưởng cho diarization ưu tiên tránh merge.
+* **NeMo Titanet & ECAPA**: F1 ≈87.3% (Precision 0.975 / Recall ~0.79) → trade-off cân bằng hơn, tăng recall ~2% so với SpeechBrain trong khi precision vẫn rất cao.
 
 ---
 
-# 5. Hành vi hai model qua đồ thị
+# 5. Hàm ý thực tế
 
-## 🔵 Pyannote (xanh)
-
-* Precision tụt nhanh khi Recall tăng
-* Ở Recall 0.5, precision chỉ ~0.88
-* Ở Recall 0.8, precision còn ~0.70
-* Đây là dấu hiệu của **score distribution overlap lớn**
-  → same-speaker và diff-speaker không tách biệt rõ
+* **Chọn embedding**: Titanet hoặc NeMo ECAPA nếu bạn có GPU; SpeechBrain là lựa chọn nhẹ nhưng sát nút về hiệu năng; Pyannote chỉ nên dùng trong pipeline gốc của họ.
+* **Tuning threshold**:
+  * Dành cho diarization (ưu tiên precision): đặt cosine threshold ~0.59 (NeMo) hoặc 0.61 (SpeechBrain) tương ứng điểm best F1 → hầu như không merge.
+  * Cần recall cao hơn (speaker search): có thể hạ threshold cho NeMo tới khi Precision ~0.95 (theo đoạn đuôi đường cong) để lấy Recall >0.9.
+* **Clustering pipelines**: PR-AUC >0.92 giúp affinity matrix sắc nét, VBx/AHC ổn định hơn; Pyannote cần thêm heuristic để hạn chế merge.
 
 ---
 
-## 🔴 SpeechBrain (đỏ)
+# 6. Kết luận
 
-* Giữ Precision ≈ 1 cho đến gần Recall 0.8
-* Chỉ bắt đầu giảm sau 0.8
+* Khoảng cách PR-AUC giữa nhóm ECAPA/Titanet (~0.93) và Pyannote (~0.73) trùng khớp với bảng `result.log`, chứng minh lợi thế rõ ràng.
+* Điểm best F1 thể hiện Precision ≥97% cho tất cả embedding ECAPA/Titanet, trong khi Pyannote chỉ 68%.
+* Khi báo cáo, kết hợp đồ thị này với `explain_result.md` để giải thích vì sao ta chọn embedding NeMo/SpeechBrain cho production diarization.
 
-Điều này chứng minh:
-
-### → Score threshold có vùng ổn định rất rộng
-
-```
-(tốt cho diarization: threshold không nhạy cảm)  
-```
-
-### → Model cực kỳ mạnh ở việc tránh nhầm lẫn hai speaker
-
-### → Chất lượng embedding vượt trội Pyannote
-
----
-
-# 6. Ý nghĩa thực tiễn cho diarization
-
-### ✔ SpeechBrain embedding (ECAPA):
-
-* Rất ít merge cluster
-* Nhiều ngưỡng clustering hoạt động tốt (robust threshold)
-* Cosine similarity matrix sạch, có separable margins
-* Kết hợp với VBx / AHC sẽ giảm mạnh DER
-
-### ✔ Pyannote embedding:
-
-* Đồ thị cho thấy rất dễ gây merge
-* Precision thấp → cộng dồn merge → DER cao
-* Chỉ phù hợp khi dùng cả pipeline Pyannote tích hợp (not standalone)

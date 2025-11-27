@@ -226,7 +226,8 @@ RTF: 0.2100 (min) | 0.9800 (max)
 
 Script `eval_diarization.py` được sử dụng để:
 - Đánh giá chất lượng speaker verification/diarization
-- So sánh 2 loại embeddings: Pyannote và SpeechBrain
+- So sánh multiple embeddings từ nhiều models: Pyannote, SpeechBrain, NeMo (TitaNet, ECAPA-TDNN)
+- Hỗ trợ multiple instances của cùng model type (ví dụ: 2 NeMo models với configs khác nhau)
 - Tính toán multiple metrics: EER, FAR, FRR, Precision, Recall, F1, AUC
 - Visualize ROC curves, DET curves, Precision-Recall curves
 - Tìm optimal threshold cho từng metric
@@ -245,12 +246,34 @@ pip install numpy
 ### Pipeline
 ```python
 from fusion_diarization import RealtimeSpeakerDiarization
-pipeline = RealtimeSpeakerDiarization()
+
+# Fusion pipeline với multiple model instances
+pipeline = RealtimeSpeakerDiarization(
+    models=[
+        ('nemo', 'nemo_titanet'),
+        ('nemo', 'nemo_ecapa_tdnn'),
+        ('pyannote', 'pyan_community'),
+        ('speechbrain', 'sb_default')
+    ],
+    model_configs={
+        'nemo_titanet': {'pretrained_speaker_model': 'titanet_large'},
+        'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+        'pyan_community': {
+            'model_name': "pyannote/speaker-diarization-community-1",
+            'token': os.getenv("HF_TOKEN")
+        },
+        'sb_default': {}
+    }
+)
 ```
 
-Pipeline extract 2 loại embeddings:
+Pipeline extract 4 loại embeddings từ multiple model instances:
+- **NeMo TitaNet embeddings**: From NVIDIA NeMo TitaNet Large
+- **NeMo ECAPA-TDNN embeddings**: From NVIDIA NeMo ECAPA-TDNN
 - **Pyannote embeddings**: From pyannote.audio
 - **SpeechBrain embeddings**: From SpeechBrain ECAPA-TDNN
+
+**Lưu ý**: Bạn có thể sử dụng nhiều instances của cùng model type với configs khác nhau. Ví dụ: 2 NeMo models với pretrained models khác nhau.
 
 ### Evaluation Process
 
@@ -347,34 +370,116 @@ Script tự động tạo 3 loại biểu đồ trong folder `eval_results/`:
 - **Trục X**: False Positive Rate (FAR)
 - **Trục Y**: True Positive Rate (1 - FRR)
 - **Features**:
-  - So sánh Pyannote vs SpeechBrain
-  - Hiển thị AUC score
-  - Đánh dấu điểm EER
+  - So sánh tất cả models (Pyannote, SpeechBrain, NeMo variants)
+  - Hiển thị AUC score cho mỗi model
+  - Đánh dấu điểm EER cho mỗi curve
   - Đường baseline (random classifier)
+- **Color coding**:
+  - Blue: Pyannote
+  - Red: SpeechBrain  
+  - Green: NeMo TitaNet
+  - Yellow: NeMo ECAPA-TDNN
 
 ### 2. DET Curve (`det_curves.png`)
 - **Trục X**: False Acceptance Rate (%)
 - **Trục Y**: False Rejection Rate (%)
 - **Features**:
   - Dễ nhìn hơn cho speaker verification
-  - Đánh dấu điểm EER
-  - Đường chéo FAR=FRR
+  - Đánh dấu điểm EER cho mỗi model
+  - Đường chéo FAR=FRR (EER line)
+- **Color coding**: Giống ROC curves
+  - Blue: Pyannote | Red: SpeechBrain
+  - Green: NeMo TitaNet | Yellow: NeMo ECAPA-TDNN
 
 ### 3. Precision-Recall Curve (`precision_recall_curves.png`)
 - **Trục X**: Recall
 - **Trục Y**: Precision
 - **Features**:
-  - Hiển thị PR AUC
-  - Đánh dấu điểm Best F1
-  - So sánh 2 embeddings
+  - Hiển thị PR AUC cho mỗi model
+  - Đánh dấu điểm Best F1 cho mỗi curve
+  - So sánh tất cả embeddings
+- **Color coding**: Giống ROC/DET curves
+  - Blue: Pyannote | Red: SpeechBrain
+  - Green: NeMo TitaNet | Yellow: NeMo ECAPA-TDNN
+
+## 🎯 Multiple Model Instances
+
+Script hỗ trợ đánh giá multiple instances của cùng model type với configs khác nhau:
+
+### Ví dụ: Multiple NeMo Models
+```python
+pipeline = RealtimeSpeakerDiarization(
+    models=[
+        ('nemo', 'nemo_titanet'),        # NeMo với TitaNet Large
+        ('nemo', 'nemo_ecapa_tdnn'),     # NeMo với ECAPA-TDNN
+        ('pyannote', 'pyan_community'),   # Pyannote
+        ('speechbrain', 'sb_default')     # SpeechBrain
+    ],
+    model_configs={
+        'nemo_titanet': {'pretrained_speaker_model': 'titanet_large'},
+        'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+        'pyan_community': {
+            'model_name': "pyannote/speaker-diarization-community-1",
+            'token': os.getenv("HF_TOKEN")
+        },
+        'sb_default': {}
+    }
+)
+```
+
+### Lợi ích:
+- **So sánh variants**: So sánh hiệu suất giữa các pretrained models khác nhau
+- **Tối ưu selection**: Chọn model config tốt nhất cho dataset cụ thể
+- **Ensemble insights**: Hiểu được đóng góp của từng model trong fusion
+- **Efficient extraction**: Extract tất cả embeddings chỉ 1 lần
+
+### Caching System:
+Script có caching mechanism để tối ưu tốc độ:
+- **Auto cache**: Tự động lưu embeddings sau khi extract
+- **Cache key**: Dựa trên MD5 hash của danh sách files
+- **Reusable**: Cache có thể tái sử dụng cho nhiều lần chạy
+- **Clear cache**: Sử dụng `clear_cache()` để xóa cache cũ
+
+```python
+# Sử dụng cache (mặc định)
+results = evaluate_dataset("dataset/jvs_ver1", use_cache=True)
+
+# Force re-extract (không dùng cache)
+results = evaluate_dataset("dataset/jvs_ver1", use_cache=False)
+
+# Xóa tất cả cache
+clear_cache()
+```
 
 ## 🚀 Cách sử dụng
 
 ### 1. Chuẩn bị dataset
 Organize audio files theo cấu trúc folder như trên.
 
-### 2. Cấu hình (optional)
-Trong `eval_diarization.py`, có thể điều chỉnh:
+### 2. Cấu hình pipeline
+Trong `eval_diarization.py`, cấu hình fusion pipeline:
+```python
+pipeline = RealtimeSpeakerDiarization(
+    models=[
+        ('nemo', 'nemo_titanet'),
+        ('nemo', 'nemo_ecapa_tdnn'),
+        ('pyannote', 'pyan_community'),
+        ('speechbrain', 'sb_default')
+    ],
+    model_configs={
+        'nemo_titanet': {'pretrained_speaker_model': 'titanet_large'},
+        'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+        'pyan_community': {
+            'model_name': "pyannote/speaker-diarization-community-1",
+            'token': os.getenv("HF_TOKEN")
+        },
+        'sb_default': {}
+    }
+)
+```
+
+### 3. Cấu hình evaluation (optional)
+Có thể điều chỉnh các tham số:
 ```python
 # Số lượng trials
 max_genuine_per_spk = 50
@@ -385,15 +490,18 @@ output_dir = "eval_results"
 
 # Dataset path
 dataset_path = "dataset/jvs_ver1"
+
+# Cache settings
+use_cache = True  # False để force re-extract
 ```
 
-### 3. Chạy evaluation
+### 4. Chạy evaluation
 ```bash
 cd backend/eval
 python eval_diarization.py
 ```
 
-### 4. Xem kết quả
+### 5. Xem kết quả
 
 **Console Output:**
 ```
@@ -415,6 +523,20 @@ Precision@EER: 95.13% | Recall@EER: 95.11% | F1@EER: 95.12%
 Best F1: 96.87% | Precision@F1: 96.45% | Recall@F1: 97.29% | Thr(F1): 0.7456
 AUC: 0.9912
 
+=== Evaluating nemo_titanet embeddings ===
+Computing metrics on 14850 valid trials
+EER: 3.45% | FAR@EER: 3.42% | FRR@EER: 3.48% | Thr(EER): 0.7456
+Precision@EER: 96.55% | Recall@EER: 96.52% | F1@EER: 96.53%
+Best F1: 97.89% | Precision@F1: 97.65% | Recall@F1: 98.13% | Thr(F1): 0.7890
+AUC: 0.9945
+
+=== Evaluating nemo_ecapa_tdnn embeddings ===
+Computing metrics on 14850 valid trials
+EER: 4.12% | FAR@EER: 4.10% | FRR@EER: 4.14% | Thr(EER): 0.7234
+Precision@EER: 95.88% | Recall@EER: 95.86% | F1@EER: 95.87%
+Best F1: 97.34% | Precision@F1: 97.12% | Recall@F1: 97.56% | Thr(F1): 0.7567
+AUC: 0.9928
+
 === Plotting curves ===
 ROC curve saved to: eval_results/roc_curves.png
 DET curve saved to: eval_results/det_curves.png
@@ -422,9 +544,19 @@ Precision-Recall curve saved to: eval_results/precision_recall_curves.png
 ```
 
 **Generated Files:**
-- `eval_results/roc_curves.png`
-- `eval_results/det_curves.png`
-- `eval_results/precision_recall_curves.png`
+- `eval_results/roc_curves.png` - So sánh ROC curves của tất cả models
+- `eval_results/det_curves.png` - So sánh DET curves của tất cả models  
+- `eval_results/precision_recall_curves.png` - So sánh PR curves của tất cả models
+- `eval_cache/embeddings_cache_*.pkl` - Cached embeddings (auto-generated)
+
+**Final Results Output:**
+```python
+=== Final Results ===
+Pyannote: {'EER': 0.0523, 'AUC': 0.9876, ...}
+SpeechBrain: {'EER': 0.0487, 'AUC': 0.9912, ...}
+NeMo Titanet: {'EER': 0.0345, 'AUC': 0.9945, ...}
+NeMo Ecapa TDNN: {'EER': 0.0412, 'AUC': 0.9928, ...}
+```
 
 ## 🛡️ Error Handling
 
@@ -486,11 +618,13 @@ Script xử lý robust với các edge cases:
 ### 1. Single Embedding Extraction
 Extract embeddings **chỉ 1 lần** cho mỗi file:
 ```python
-# Extract cả 2 loại embeddings cùng lúc
-result, _, _ = pipeline._extract_embeddings(file_path, max_speakers=1)
+# Extract tất cả embeddings từ các model instances cùng lúc
+result, _ = pipeline._extract_embeddings(file_path, max_speakers=1)
 emb_cache[file_path] = {
-    "pyannote": result["pyannote_embeddings"][0],
-    "speechbrain": result["speechbrain_embeddings"][0]
+    "pyannote": result["pyan_community_embeddings"][0],
+    "speechbrain": result["sb_default_embeddings"][0],
+    "nemo_titanet": result["nemo_tianet_embeddings"][0],
+    "nemo_ecapa_tdnn": result["nemo_ecapa_tdnn_embeddings"][0]
 }
 ```
 
@@ -528,7 +662,9 @@ for fpath in tqdm(list(all_files), desc="Extracting embeddings"):
    - Dùng threshold tại EER cho balanced performance
    - Dùng threshold tại Best F1 cho maximum accuracy
 4. **Visualization**: Xem curves để understand model behavior
-5. **Embedding comparison**: So sánh Pyannote vs SpeechBrain để chọn best model
+5. **Embedding comparison**: So sánh giữa các models (Pyannote, SpeechBrain, NeMo variants) để chọn best model
+6. **Multiple instances**: Sử dụng multiple instances của cùng model type với configs khác nhau để đánh giá và so sánh
+7. **Cache management**: Script có caching mechanism để tránh re-extract embeddings
 
 ---
 
@@ -549,5 +685,8 @@ for fpath in tqdm(list(all_files), desc="Extracting embeddings"):
 ## Models
 - [Pyannote Audio](https://github.com/pyannote/pyannote-audio)
 - [SpeechBrain](https://github.com/speechbrain/speechbrain)
+- [NVIDIA NeMo](https://github.com/NVIDIA/NeMo)
+  - [TitaNet](https://docs.nvidia.com/deeplearning/nemo/user-guide/docs/en/main/asr/speaker_recognition/models.html#titanet)
+  - [ECAPA-TDNN](https://docs.nvidia.com/deeplearning/nemo/user-guide/docs/en/main/asr/speaker_recognition/models.html#ecapa-tdnn)
 - [Google Gemini](https://ai.google.dev/)
 - [vLLM](https://github.com/vllm-project/vllm)

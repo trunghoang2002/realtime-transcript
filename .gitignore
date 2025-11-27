@@ -2,3 +2,4 @@ __pycache__/
 .env
 dataset/
 pretrained_models/
+eval_cache/

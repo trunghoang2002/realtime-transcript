@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import random
 import numpy as np
 from tqdm import tqdm
@@ -6,11 +8,29 @@ from glob import glob
 from itertools import combinations
 from sklearn.metrics import roc_curve, precision_recall_fscore_support, auc, precision_recall_curve
 import matplotlib.pyplot as plt
+import pickle
+import hashlib
 import sys
 sys.path.append("..")
 from fusion_diarization import RealtimeSpeakerDiarization
 
-pipeline = RealtimeSpeakerDiarization()
+pipeline = RealtimeSpeakerDiarization(
+    models=[
+        ('nemo', 'nemo_tianet'),
+        ('nemo', 'nemo_ecapa_tdnn'),
+        ('pyannote', 'pyan_community'),
+        ('speechbrain', 'sb_default')
+    ],
+    model_configs={
+        'nemo_tianet': {'pretrained_speaker_model': 'titanet_large'},
+        'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+        'pyan_community': {
+            'model_name': "pyannote/speaker-diarization-community-1",
+            'token': os.getenv("HF_TOKEN")
+        },
+        'sb_default': {}
+    }
+)
 
 random.seed(123)
 np.random.seed(123)
@@ -64,10 +84,71 @@ def build_trials(spk2utts, max_genuine_per_spk=50, impostor_per_spk=100):
     random.shuffle(trials)
     return trials
 
-# ========= 3) Trích embedding =========
-def extract_all_embeddings(trials):
-    """Extract embeddings một lần cho tất cả các file, lưu cả 2 loại."""
-    emb_cache = {}  # {file_path: {"pyannote": emb, "speechbrain": emb}}
+# ========= 3) Cache management =========
+def get_cache_key(trials):
+    """Tạo unique key từ danh sách trials để identify cache."""
+    all_files = sorted(set([p for t in trials for p in (t[0], t[1])]))
+    files_str = '|'.join(all_files)
+    return hashlib.md5(files_str.encode()).hexdigest()
+
+def save_embedding_cache(emb_cache, cache_file):
+    """Lưu embedding cache ra file."""
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(emb_cache, f)
+        print(f"Saved embedding cache to: {cache_file}")
+        return True
+    except Exception as e:
+        print(f"Error saving cache: {e}")
+        return False
+
+def load_embedding_cache(cache_file):
+    """Load embedding cache từ file."""
+    try:
+        if not os.path.exists(cache_file):
+            return None
+        with open(cache_file, 'rb') as f:
+            emb_cache = pickle.load(f)
+        print(f"Loaded embedding cache from: {cache_file} ({len(emb_cache)} files)")
+        return emb_cache
+    except Exception as e:
+        print(f"Error loading cache: {e}")
+        return None
+
+def clear_cache(cache_dir="eval_cache"):
+    """Xóa tất cả cache files trong thư mục cache."""
+    try:
+        if os.path.exists(cache_dir):
+            import shutil
+            shutil.rmtree(cache_dir)
+            print(f"Cleared all cache in: {cache_dir}")
+            return True
+        else:
+            print(f"Cache directory does not exist: {cache_dir}")
+            return False
+    except Exception as e:
+        print(f"Error clearing cache: {e}")
+        return False
+
+# ========= 4) Trích embedding =========
+def extract_all_embeddings(trials, cache_dir="eval_cache", use_cache=True):
+    """Extract embeddings một lần cho tất cả các file, lưu cả 3 loại."""
+    
+    # Tạo cache key và đường dẫn
+    cache_key = get_cache_key(trials)
+    cache_file = os.path.join(cache_dir, f"embeddings_cache_{cache_key}.pkl")
+    
+    # Thử load từ cache nếu use_cache=True
+    if use_cache:
+        emb_cache = load_embedding_cache(cache_file)
+        if emb_cache is not None:
+            print("Using cached embeddings, skipping extraction.")
+            return emb_cache
+        else:
+            print("No valid cache found, extracting embeddings...")
+    
+    emb_cache = {}  # {file_path: {"pyannote": emb, "speechbrain": emb, "nemo_tianet": emb, "nemo_ecapa_tdnn": emb}}
     failed_files = []
     
     # Lấy danh sách tất cả các file unique
@@ -79,33 +160,43 @@ def extract_all_embeddings(trials):
     # Extract embeddings một lần cho mỗi file
     for fpath in tqdm(list(all_files), desc="Extracting embeddings"):
         try:
-            result, _, _ = pipeline._extract_embeddings(fpath, max_speakers=1)
+            result, _ = pipeline._extract_embeddings(fpath, max_speakers=1)
             
             # Kiểm tra nếu result hoặc embeddings là None/empty
             if result is None:
                 failed_files.append(fpath)
                 continue
                 
-            pyannote_emb = result.get("pyannote_embeddings")
-            speechbrain_emb = result.get("speechbrain_embeddings")
+            pyannote_emb = result.get("pyan_community_embeddings")
+            speechbrain_emb = result.get("sb_default_embeddings")
+            nemo_emb_tianet = result.get("nemo_tianet_embeddings")
+            nemo_emb_ecapa_tdnn = result.get("nemo_ecapa_tdnn_embeddings")
             
             if (pyannote_emb is None or len(pyannote_emb) == 0 or
-                speechbrain_emb is None or len(speechbrain_emb) == 0):
+                speechbrain_emb is None or len(speechbrain_emb) == 0 or
+                nemo_emb_tianet is None or len(nemo_emb_tianet) == 0 or
+                nemo_emb_ecapa_tdnn is None or len(nemo_emb_ecapa_tdnn) == 0):
                 failed_files.append(fpath)
                 continue
             
             # Kiểm tra embedding có toàn 0 hoặc NaN không
             pyannote_vec = pyannote_emb[0]
             speechbrain_vec = speechbrain_emb[0]
+            nemo_vec_tianet = nemo_emb_tianet[0]
+            nemo_vec_ecapa_tdnn = nemo_emb_ecapa_tdnn[0]
             
             if (np.all(pyannote_vec == 0) or np.all(np.isnan(pyannote_vec)) or
-                np.all(speechbrain_vec == 0) or np.all(np.isnan(speechbrain_vec))):
+                np.all(speechbrain_vec == 0) or np.all(np.isnan(speechbrain_vec)) or
+                np.all(nemo_vec_tianet == 0) or np.all(np.isnan(nemo_vec_tianet)) or
+                np.all(nemo_vec_ecapa_tdnn == 0) or np.all(np.isnan(nemo_vec_ecapa_tdnn))):
                 failed_files.append(fpath)
                 continue
             
             emb_cache[fpath] = {
                 "pyannote": pyannote_vec.copy(),
-                "speechbrain": speechbrain_vec.copy()
+                "speechbrain": speechbrain_vec.copy(),
+                "nemo_tianet": nemo_vec_tianet.copy(),
+                "nemo_ecapa_tdnn": nemo_vec_ecapa_tdnn.copy()
             }
         except Exception as e:
             print(f"\nError extracting embeddings from {fpath}: {e}")
@@ -115,9 +206,13 @@ def extract_all_embeddings(trials):
     if failed_files:
         print(f"\nWarning: Failed to extract embeddings from {len(failed_files)}/{len(all_files)} files")
     
+    # Lưu cache nếu use_cache=True
+    if use_cache and len(emb_cache) > 0:
+        save_embedding_cache(emb_cache, cache_file)
+    
     return emb_cache
 
-# ========= 4) Tính score =========
+# ========= 5) Tính score =========
 def compute_scores_from_cache(trials, emb_cache, embedding_type):
     """Tính cosine scores từ cache có sẵn cho một loại embedding cụ thể."""
     scores, labels = [], []
@@ -166,7 +261,7 @@ def compute_scores_from_cache(trials, emb_cache, embedding_type):
     
     return np.array(scores), np.array(labels)
 
-# ========= 5) FAR/FRR/EER =========
+# ========= 6) FAR/FRR/EER =========
 def compute_metrics_at_threshold(scores, labels, threshold):
     """Tính precision, recall, F1 tại một threshold cụ thể."""
     predictions = (scores >= threshold).astype(int)
@@ -228,14 +323,14 @@ def compute_far_frr_eer(scores, labels):
     }
 
 def plot_roc_curves(results, output_dir="eval_results"):
-    """Vẽ và lưu ROC curves cho cả 2 loại embeddings."""
+    """Vẽ và lưu ROC curves cho cả 3 loại embeddings."""
     os.makedirs(output_dir, exist_ok=True)
     
     plt.figure(figsize=(10, 8))
     
-    colors = {"pyannote": "blue", "speechbrain": "red"}
+    colors = {"pyannote": "blue", "speechbrain": "red", "nemo_tianet": "green", "nemo_ecapa_tdnn": "yellow"}
     
-    for emb_type in ["pyannote", "speechbrain"]:
+    for emb_type in ["pyannote", "speechbrain", "nemo_tianet", "nemo_ecapa_tdnn"]:
         if results[emb_type] is None:
             continue
             
@@ -278,9 +373,9 @@ def plot_det_curves(results, output_dir="eval_results"):
     
     plt.figure(figsize=(10, 8))
     
-    colors = {"pyannote": "blue", "speechbrain": "red"}
+    colors = {"pyannote": "blue", "speechbrain": "red", "nemo_tianet": "green", "nemo_ecapa_tdnn": "yellow"}
     
-    for emb_type in ["pyannote", "speechbrain"]:
+    for emb_type in ["pyannote", "speechbrain", "nemo_tianet", "nemo_ecapa_tdnn"]:
         if results[emb_type] is None:
             continue
             
@@ -322,9 +417,9 @@ def plot_precision_recall_curves(results, scores_data, output_dir="eval_results"
     
     plt.figure(figsize=(10, 8))
     
-    colors = {"pyannote": "blue", "speechbrain": "red"}
+    colors = {"pyannote": "blue", "speechbrain": "red", "nemo_tianet": "green", "nemo_ecapa_tdnn": "yellow"}
     
-    for emb_type in ["pyannote", "speechbrain"]:
+    for emb_type in ["pyannote", "speechbrain", "nemo_tianet", "nemo_ecapa_tdnn"]:
         if results[emb_type] is None or emb_type not in scores_data:
             continue
             
@@ -360,22 +455,28 @@ def plot_precision_recall_curves(results, scores_data, output_dir="eval_results"
     print(f"Precision-Recall curve saved to: {pr_path}")
     plt.close()
 
-# ========= 6) Chạy end-to-end =========
-def evaluate_dataset(root):
-    """Đánh giá cả 2 loại embeddings trong 1 lần chạy."""
+# ========= 7) Chạy end-to-end =========
+def evaluate_dataset(root, output_dir="eval_results", use_cache=True):
+    """Đánh giá cả 3 loại embeddings trong 1 lần chạy.
+    
+    Args:
+        root: Đường dẫn đến dataset
+        use_cache: Nếu True, sẽ load embeddings từ cache (nếu có) hoặc lưu cache sau khi extract.
+                   Nếu False, sẽ extract lại từ đầu và không lưu cache.
+    """
     spk2utts = list_speakers_and_utts(root)
     print(f"Found {len(spk2utts)} speakers usable.")
     trials = build_trials(spk2utts, max_genuine_per_spk=50, impostor_per_spk=100)
     print(f"Total trials: {len(trials)}")
     
-    # Extract embeddings một lần cho tất cả files
-    emb_cache = extract_all_embeddings(trials)
+    # Extract embeddings một lần cho tất cả files (hoặc load từ cache)
+    emb_cache = extract_all_embeddings(trials, use_cache=use_cache)
     
-    # Tính metrics cho cả 2 loại embeddings
+    # Tính metrics cho cả 3 loại embeddings
     results = {}
     scores_data = {}  # Lưu scores để vẽ precision-recall curves
     
-    for emb_type in ["pyannote", "speechbrain"]:
+    for emb_type in ["pyannote", "speechbrain", "nemo_tianet", "nemo_ecapa_tdnn"]:
         print(f"\n=== Evaluating {emb_type} embeddings ===")
         scores, labels = compute_scores_from_cache(trials, emb_cache, emb_type)
         
@@ -402,14 +503,20 @@ def evaluate_dataset(root):
     
     # Vẽ và lưu các biểu đồ
     print("\n=== Plotting curves ===")
-    plot_roc_curves(results)
-    plot_det_curves(results)
-    plot_precision_recall_curves(results, scores_data)
+    plot_roc_curves(results, output_dir)
+    plot_det_curves(results, output_dir)
+    plot_precision_recall_curves(results, scores_data, output_dir)
     
     return results
 
 if __name__ == "__main__":
-    results = evaluate_dataset("dataset/jvs_ver1")
+    # Nếu muốn xóa cache cũ và extract lại từ đầu, uncomment dòng này:
+    # clear_cache()
+    
+    # Sử dụng cache để tăng tốc (set use_cache=False để force re-extract)
+    results = evaluate_dataset("dataset/jvs_ver1", output_dir="eval_results", use_cache=True)
     print("\n=== Final Results ===")
     print("Pyannote:", results["pyannote"])
     print("SpeechBrain:", results["speechbrain"])
+    print("NeMo Titanet:", results["nemo_tianet"])
+    print("NeMo Ecapa TDNN:", results["nemo_ecapa_tdnn"])

@@ -34,4 +34,4 @@ echo "Starting server with CUDA support..."
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 
 # Chạy script
-CUDA_VISIBLE_DEVICES=1 python eval_diarization.py
+CUDA_VISIBLE_DEVICES=0 python eval_diarization.py

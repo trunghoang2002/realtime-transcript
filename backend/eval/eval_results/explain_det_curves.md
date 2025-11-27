@@ -2,114 +2,64 @@
 
 # 1. DET Curve là gì?
 
-DET (Detection Error Tradeoff) plot biểu diễn mối quan hệ giữa:
-
-* **FAR (False Acceptance Rate)** – nhận nhầm người khác là cùng người
-* **FRR (False Rejection Rate)** – từ chối nhầm đúng người
-
-Hai trục đều ở thang **log-normal**, giúp nhìn rõ khác biệt nhỏ trong vùng thấp.
-
-Điểm FAR = FRR chính là **EER**.
+* Trục X: **False Acceptance Rate (FAR)**.
+* Trục Y: **False Rejection Rate (FRR)**.
+* DET sử dụng thang log-normal giúp phóng đại sự khác biệt ở vùng lỗi thấp.
+* Điểm giao với đường nét đứt FAR = FRR chính là **Equal Error Rate (EER)**.
 
 ---
 
-# 2. Nhìn vào đồ thị này thấy gì ngay?
+# 2. Tổng quan đồ thị
 
-### ✔ Màu đỏ = SpeechBrain ECAPA
+| Model             | Màu đường | EER (%) | FAR tại EER (%)  | FRR tại EER (%)  |
+| ----------------- | --------- | ------- | ---------------- | ---------------- |
+| Pyannote          | Xanh lam  | 27.77   | 27.77            | 27.76            |
+| SpeechBrain ECAPA | Đỏ        | 15.36   | 15.36            | 15.37            |
+| NeMo Titanet      | Xanh lá   | 14.65   | 14.65            | 14.65            |
+| NeMo ECAPA TDNN   | Vàng      | 14.95   | 14.95            | 14.96            |
 
-→ Luôn nằm **thấp hơn và trái hơn** màu xanh
-→ **Tốt hơn trên toàn bộ dải threshold**
-
-### ✔ Màu xanh = Pyannote
-
-→ Luôn cao hơn → sai nhiều hơn → embedding yếu
-
-=> **SpeechBrain vượt trội so với Pyannote trong phân biệt speaker.**
-
----
-
-# 3. Hai điểm đen (dấu tròn) trên biểu đồ
-
-Hai điểm đen trên mỗi đường cong chính là:
-
-### **Điểm EER (Equal Error Rate)**
-
-* Nơi FAR = FRR
-* Threshold tối ưu theo tiêu chuẩn EER
-
-Trong hình:
-
-### 🔵 Pyannote:
-
-* EER ≈ **27.8%**
-  → cả FAR và FRR đều rất cao → model phân biệt speaker kém
-  → embedding không đủ tách biệt giữa same-speaker và diff-speaker
-
-### 🔴 SpeechBrain:
-
-* EER ≈ **15.36%**
-  → tốt gần **gấp đôi** Pyannote
-  → embedding tách biệt rõ hơn
-
-Dấu hiệu rõ ràng: điểm EER của màu đỏ **thấp hơn và lệch trái**, nghĩa là:
-
-* FAR thấp hơn
-* FRR thấp hơn
-* Model mạnh hơn
+* Các đường **NeMo Titanet / NeMo ECAPA / SpeechBrain** nằm sát nhau ở vùng thấp trái → lỗi đều quanh 15%.
+* **Pyannote** nằm hẳn phía trên bên phải → cần FAR cao hơn mới đạt cùng FRR → biểu hiện của embedding yếu.
 
 ---
 
-# 4. Đường màu đỏ nằm thấp hơn & trái hơn toàn bộ đường xanh
+# 3. Giải thích hình dạng từng đường
 
-SpeechBrain có đường cong:
+### 🔵 Pyannote
+* Đường cong dốc chậm và treo cao: khi giảm FAR thì FRR vẫn >20%.
+* Thậm chí ở FAR 10% vẫn còn FRR >25%, chứng tỏ score overlap lớn giữa same/diff speaker.
 
-* **Giảm FAR nhanh hơn** khi tăng threshold
-* **Tăng FRR chậm hơn**
+### 🟥 SpeechBrain ECAPA
+* Nhanh chóng hạ xuống vùng FAR/FRR <20%.
+* Đường cong khá mượt, song vẫn cao hơn hai model NeMo ở đoạn 5–15% FAR.
 
-Điều đó nghĩa là:
-
-### → Score distribution của SpeechBrain separable hơn
-
-* Same-speaker scores cao, tập trung
-* Different-speaker scores thấp, tách biệt
-* Ít overlap → ROC, DET, PR đều đẹp
-
-Trong khi Pyannote:
-
-* Overlap lớn
-* Khi giảm FAR thì FRR tăng mạnh
-  → hai tập score dính vào nhau
+### 🟢 NeMo Titanet & 🟡 NeMo ECAPA
+* Gần như trùng nhau và là đường thấp nhất trên toàn miền.
+* Ở FAR 10% chúng chỉ có FRR ~13–14%, tiếp tục giảm khi FAR nhích lên → tốt nhất cho trade-off.
 
 ---
 
-# 5. Ý nghĩa thực tế cho Speaker Diarization
+# 4. Các điểm EER (chấm màu)
 
-Với kết quả như biểu đồ:
+* **Pyannote**: chấm xanh nằm ở FAR ≈ 28%, FRR ≈ 28% → lỗi gần gấp đôi so với nhóm còn lại.
+* **SpeechBrain**: chấm đỏ tại FAR ≈ 15% / FRR ≈ 15% → giảm 12 điểm phần trăm so với Pyannote.
+* **NeMo Titanet (xanh lá)** và **NeMo ECAPA (vàng)**: chấm nằm thấp nhất (~14.7%) → hiện đang dẫn đầu.
 
-### ✔ SpeechBrain giúp diarization:
-
-* Ít merge (giảm FAR)
-* Ít split (giảm FRR)
-* Clustering ổn định hơn (AHC / VBx)
-* Ngưỡng (threshold) dễ điều chỉnh hơn
-* DER sẽ giảm đáng kể
-
-### ✔ Pyannote embedding:
-
-* Merge rất nhiều speaker (FAR cao)
-* Split nhiều (FRR cao)
-* Thường dẫn tới DER cực cao
-* Chỉ phù hợp khi chạy trong **Pyannote pipeline full**
-  (vì Pyannote đã tinh chỉnh threshold/PLDA riêng)
+Nhìn ngang qua đường nét đứt FAR = FRR có thể thấy rõ thứ tự: Titanet ≈ NeMo ECAPA < SpeechBrain ≪ Pyannote.
 
 ---
 
-# 6. Nhìn vào đường nét đứt màu đen (EER line)
+# 5. Hàm ý thực tế
 
-Đây là đường “FAR = FRR”.
+* **Chọn embedding**: nếu muốn EER thấp nhất, dùng NeMo Titanet hoặc NeMo ECAPA; SpeechBrain là lựa chọn nhẹ mà vẫn giữ EER ~15%.
+* **Tuning threshold**:
+  * Diarization ưu tiên tránh merge → đặt cosine threshold tương đương các điểm EER/Best-F1 đã ghi trong `result.log` (NeMo ~0.59, SpeechBrain ~0.61) để giữ FAR ~15% hoặc thấp hơn.
+  * Nếu cần giảm FRR thêm, chấp nhận FAR nhỉnh hơn: đọc đoạn cuối đường cong (FAR 20% → FRR ~10% cho NeMo).
+* **Pipeline Pyannote**: chỉ nên dùng embedding này khi chạy full pipeline của họ (có PLDA, re-scoring). Nếu dùng standalone, DET cho thấy sẽ có cả merge và split cao, kéo DER lên mạnh.
 
-Điểm giao giữa đường cong và đường nét đứt:
+---
 
-* Cho ngưỡng tối ưu theo EER
-* Dễ nhìn thấy SpeechBrain giao ở khoảng FAR ≈ 15%
-* Và Pyannote giao ở FAR ≈ 28%
+# 6. Cách dùng hình trong báo cáo
+
+* Hình DET cho thấy rõ “khoảng cách an toàn” giữa nhóm ECAPA/Titanet và Pyannote ở tất cả vùng FAR.
+* Đính kèm bảng EER ở trên + trích đường nét đứt để giải thích lý do lựa chọn embedding cuối cùng cho production.

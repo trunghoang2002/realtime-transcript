@@ -16,6 +16,22 @@ Precision@EER: 73.39% | Recall@EER: 84.63% | F1@EER: 78.61%
 Best F1: 86.70% | Precision@F1: 99.14% | Recall@F1: 77.03% | Thr(F1): 0.6130
 AUC: 0.9369
 
+=== Evaluating nemo_tianet embeddings ===
+Skipped 251/15000 trials due to missing embeddings
+Computing metrics on 14749 valid trials
+EER: 14.65% | FAR@EER: 14.65% | FRR@EER: 14.65% | Thr(EER): 0.4092
+Precision@EER: 74.46% | Recall@EER: 85.35% | F1@EER: 79.53%
+Best F1: 87.25% | Precision@F1: 97.56% | Recall@F1: 78.90% | Thr(F1): 0.5915
+AUC: 0.9417
+
+=== Evaluating nemo_ecapa_tdnn embeddings ===
+Skipped 251/15000 trials due to missing embeddings
+Computing metrics on 14749 valid trials
+EER: 14.95% | FAR@EER: 14.95% | FRR@EER: 14.96% | Thr(EER): 0.4114
+Precision@EER: 74.01% | Recall@EER: 85.04% | F1@EER: 79.14%
+Best F1: 87.27% | Precision@F1: 97.56% | Recall@F1: 78.94% | Thr(F1): 0.5926
+AUC: 0.9417
+
 === Plotting curves ===
 
 ROC curve saved to: eval_results/roc_curves.png
@@ -31,18 +47,28 @@ SpeechBrain: {'EER': 0.15364277933144577, 'threshold_at_EER': 0.3781467771103011
        1.        ], shape=(1926,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.97764228e-01, ...,
        2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1926,)), 'thresholds': array([        inf,  0.9400493 ,  0.70697628, ..., -0.06335743,
        -0.06396167, -0.17806255], shape=(1926,))}
+NeMo Titanet: {'EER': 0.1465249775221325, 'threshold_at_EER': 0.4092250378753265, 'FAR_at_EER': 0.1465052395971106, 'FRR_at_EER': 0.14654471544715442, 'precision_at_EER': 0.7446355736832772, 'recall_at_EER': 0.8534552845528456, 'F1_at_EER': 0.795340467847334, 'best_F1': 0.8724575795033149, 'threshold_at_best_F1': 0.5914630945239923, 'precision_at_best_F1': 0.9756220155818045, 'recall_at_best_F1': 0.7890243902439025, 'AUC': 0.9417264491090327, 'FAR_curve': array([0.        , 0.        , 0.        , ..., 0.98575644, 0.98575644,  
+       1.        ], shape=(1888,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.45325203e-01, ...,
+       2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1888,)), 'thresholds': array([        inf,  0.95404786,  0.71301672, ..., -0.02433496,
+       -0.02436331, -0.21396785], shape=(1888,))}
+NeMo Ecapa TDNN: {'EER': 0.14952459413697808, 'threshold_at_EER': 0.4114152495898431, 'FAR_at_EER': 0.14945569233899686, 'FRR_at_EER': 0.1495934959349593, 'precision_at_EER': 0.7401379798337167, 'recall_at_EER': 0.8504065040650407, 'F1_at_EER': 0.791449919606545, 'best_F1': 0.8727109313560274, 'threshold_at_best_F1': 0.5926270551780972, 'precision_at_best_F1': 0.9756342627480532, 'recall_at_best_F1': 0.7894308943089431, 'AUC': 0.9416869939377999, 'FAR_curve': array([0.        , 0.        , 0.        , ..., 0.96835894, 0.96835894,
+       1.        ], shape=(1838,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.68902439e-01, ...,
+       2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1838,)), 'thresholds': array([        inf,  0.95972115,  0.72892271, ...,  0.04003473,
+        0.03996694, -0.19377163], shape=(1838,))}
 ```
 
 # 1. Nhìn nhanh vào kết quả tổng
 
-## **Pyannote EER = 27.77% → rất kém**
+| Model                | EER   | FAR@EER | FRR@EER | Best F1 | Thr(EER) | Thr(best F1) | Precision@best F1 | AUC   |
+| -------------------- | ----- | ------- | ------- | ------- | -------- | ------------ | ----------------- | ----- |
+| Pyannote             | 27.77 | 27.77   | 27.76   | 65.28   | 0.2995   | 0.4175       | 68.16             | 0.788 |
+| SpeechBrain ECAPA    | 15.36 | 15.36   | 15.37   | 86.70   | 0.3781   | 0.6130       | 99.14             | 0.937 |
+| NeMo Titanet         | 14.65 | 14.65   | 14.65   | 87.25   | 0.4092   | 0.5915       | 97.56             | 0.942 |
+| NeMo ECAPA TDNN      | 14.95 | 14.95   | 14.96   | 87.27   | 0.4114   | 0.5926       | 97.56             | 0.942 |
 
-## **SpeechBrain EER = 15.36% → tốt hơn rõ rệt**
-
-Điều này có nghĩa:
-
-* **Pyannote embeddings** phân biệt speaker yếu → similarity giữa same-speaker và different-speaker chồng lấn nhiều.
-* **SpeechBrain ECAPA embeddings** mạnh hơn đáng kể → tách speaker rõ hơn → clustering tốt hơn.
+- **NeMo Titanet và NeMo ECAPA TDNN** đang dẫn đầu với EER ~15% và F1 ~87%.
+- **SpeechBrain ECAPA** vẫn rất cạnh tranh và dễ triển khai, chỉ thua NeMo ~0.7% EER.
+- **Pyannote** tụt xa (EER 27.77%), khó dùng cho cả verification lẫn diarization.
 
 ---
 
@@ -52,272 +78,107 @@ SpeechBrain: {'EER': 0.15364277933144577, 'threshold_at_EER': 0.3781467771103011
 
 251 trial bị bỏ vì:
 
-* 1 trong 2 file không có embedding (có thể file đọc lỗi / ngắn quá / embedding model trả NaN / zero vector)
+* Một trong hai file không có embedding (file lỗi, audio quá ngắn, model trả NaN/zero).
 
-=> Không ảnh hưởng lớn (chỉ ~1.6%).
+=> Không ảnh hưởng lớn (1.6% dữ liệu), nên các metric vẫn đáng tin.
 
 ---
 
 # 3. Giải thích metric cho từng model
 
----
+## 3.1 Pyannote
 
-# 🔵 PYANNOTE EMBEDDING
+* **EER 27.77%**: hệ thống sai gần 3/10 cặp ở ngưỡng cân bằng → khó dùng.
+* **Precision@EER 56.56%**: hơn 40% cặp bị nhận nhầm là cùng speaker.
+* **Best F1 65.28% @ thr 0.4175** nhưng vẫn thấp → embedding không tách biệt.
+* **AUC 0.788**: chồng lấn lớn giữa score same/diff.
+* Kết luận: chỉ nên dùng khi không còn lựa chọn nào khác.
 
 ### **EER: 27.77%**
+## 3.2 SpeechBrain ECAPA
 
-* Khi threshold được chỉnh sao cho FAR = FRR, hệ thống sai ~28%.
-* **Đây là EER rất cao**, chứng tỏ embedding kém.
+* **EER 15.36%**, giảm 12% tuyệt đối so với Pyannote.
+* **Best F1 86.70% @ thr 0.6130** với **precision ≈ 99%** → cực ít false accept.
+* **AUC 0.9369**: đường ROC đẹp, score distribution tách rõ.
+* WER-style domain khác VoxCeleb vẫn giữ hiệu năng tốt → phù hợp cho production khi tài nguyên GPU hạn chế.
 
-Trong speaker verification:
+## 3.3 NeMo Titanet
 
-* EER < 5%: cực tốt
-* 5–10%: trung bình
-* 10–15%: dùng được tùy domain
-* **>20%: kém**
-  → Pyannote = 27.7% là *tệ rõ ràng*.
+* **EER 14.65%** (tốt nhất trong 4 model).
+* **Best F1 87.25% @ thr 0.5915**, precision 97.56% / recall 78.90%.
+* **AUC 0.9417**: cao nhất, chứng tỏ embedding ổn định.
+* Lưu ý: Titanet nặng hơn SpeechBrain, cần GPU nhưng đổi lại score cao nhất.
 
----
+## 3.4 NeMo ECAPA TDNN
 
-### **FAR@EER: 27.77%**
-
-### **FRR@EER: 27.76%**
-
-Khớp nhau → đúng tiêu chuẩn EER.
-
----
-
-### **Threshold_at_EER: 0.2995**
-
-* Cosine similarity > 0.2995 → cùng người
-* < 0.2995 → khác người
-
-Ngưỡng này **khá thấp**, cho thấy embedding scatter rộng, phân bố không tách biệt.
+* **EER 14.95%**, rất sát Titanet.
+* **Best F1 87.27% @ thr 0.5926**, precision 97.56% / recall 78.94% (gần như trùng Titanet).
+* **AUC 0.9417**: tương đương Titanet.
+* Ưu điểm: cùng họ ECAPA nên dễ fine-tune, pipeline tương tự SpeechBrain.
 
 ---
 
-### **Precision@EER: 56.56%**
+# 4. Vì sao Pyannote yếu hơn?
 
-Khi threshold = EER:
+* **Segmentation-first**: pyannote community tập trung vào diarization pipeline, embedding chỉ là bước phụ trợ nên không được huấn luyện tối ưu cho verification độc lập.
+* **Khác biệt domain**: dataset eval gồm whisper, falsetto, nonpara, high pitch → khác xa AMI/VoxConverse mà Pyannote quen thuộc.
+* **Model architecture**: không sử dụng ECAPA/x-vector mới, nên không tận dụng kỹ thuật hiện đại (channel attention, squeeze-excitation, etc.).
 
-* Chỉ 56.5% cặp predicted “same speaker” là đúng
-  → Rất nhiều false accept.
-
----
-
-### **Recall@EER: 72.24%**
-
-72% cặp same-speaker được nhận đúng → hơi khá, nhưng precision thấp kéo xuống chất lượng tổng thể.
+Ngược lại, cả SpeechBrain và hai model NeMo đều là **speaker verification chuyên dụng** (ECAPA/Titanet), được huấn luyện trên VoxCeleb2 với augment mạnh nên giữ được độ phân tách khi chuyển domain.
 
 ---
 
-### **F1@EER: 63.44%**
+# 5. Ảnh hưởng lên bài toán **speaker diarization**
 
-* Trung bình yếu
+* **NeMo Titanet / NeMo ECAPA / SpeechBrain ECAPA**: affinity matrix sắc nét, ít merge sai, giảm DER đáng kể khi feed vào AHC/VBx/k-means.
+* **Pyannote**: nhiều false accept → merge nhầm speaker khác nhau, đồng thời false reject → split một speaker thành nhiều cluster. Kết quả DER rất cao.
 
----
-
-### **Best F1: 65.28% at threshold 0.4175**
-
-Nếu tối ưu F1:
-
-* Precision: 68.16%
-* Recall: 62.64%
-
-F1 vẫn thấp → tách speaker kém.
+Tóm lại, hãy ưu tiên embedding họ ECAPA/Titanet cho mọi pipeline diarization hoặc speaker search.
 
 ---
 
-### **AUC: 0.788**
+# 6. Gợi ý chọn threshold
 
-* ROC-AUC 0.78 = mức trung bình thấp
-* Thể hiện phân bố score overlap nhiều giữa same-speaker và diff-speaker.
+## 6.1 Số liệu chính
 
----
+* **NeMo Titanet**
+  * Thr(EER): `0.4092`
+  * Thr(best F1): `0.5915`
+  * Precision@best F1: `0.9756`
+* **NeMo ECAPA TDNN**
+  * Thr(EER): `0.4114`
+  * Thr(best F1): `0.5926`
+  * Precision@best F1: `0.9756`
+* **SpeechBrain ECAPA**
+  * Thr(EER): `0.3781`
+  * Thr(best F1): `0.6130`
+  * Precision@best F1: `0.9914`
+* **Pyannote**
+  * Thr(EER): `0.2995`
+  * Thr(best F1): `0.4175`
 
-# 🔴 SPEECHBRAIN EMBEDDING (ECAPA)
+Các ngưỡng tốt nhất nên lấy từ Titanet/NeMo ECAPA (hoặc SpeechBrain nếu cần model nhẹ).
 
-## **EER: 15.36%**
+## 6.2 Chọn ngưỡng theo mục đích
 
-→ Tốt đáng kể so với Pyannote (27.7%)
+| Mục đích                      | Model gợi ý      | Threshold similarity | Lý do chính                                       |
+| ----------------------------- | ---------------- | -------------------- | ------------------------------------------------- |
+| **Diarization (ưu tiên)**     | NeMo Titanet     | **0.59–0.60**        | Precision ~0.98, hạn chế merge nhầm               |
+| Verification cân bằng         | Titanet / NeMo E | **0.41**             | FAR ≈ FRR ≈ 15% (chuẩn EER)                       |
+| Thiết lập nhẹ (không có NeMo) | SpeechBrain      | **0.61**             | Precision ~0.99, dễ deploy                       |
+| Muốn recall cao               | SpeechBrain      | **0.45–0.50**        | Recall >85%, chấp nhận merge tăng                 |
 
-Không phải mức SOTA (SOTA ECAPA có thể 2–4%),
-nhưng với **micro dataset 4 style khác nhau**, domain khác VoxCeleb, thì **15% là hợp lý và tốt**.
+## 6.3 Khuyến nghị thực tế
 
----
-
-### **Precision@EER: 73.39%**
-
-### **Recall@EER: 84.63%**
-
-Cả hai đều cao hơn nhiều so với Pyannote.
-
----
-
-### **F1@EER: 78.61%**
-
-Tốt.
-
----
-
-### **Best F1: 86.70% at threshold 0.6130**
-
-* **Precision: 99.14%** (!)
-* Recall: 77.03%
-
-Điều này nói lên rằng:
-
-* Nếu threshold đặt cao (0.613) → rất ít false accept (precision gần như tuyệt đối)
-* Nhưng recall giảm (miss some same-speaker)
-
-Đây là đặc điểm của **embedding phân bố tốt, tail clean**.
+* **Prod diarization**: đặt ngưỡng cosine ~`0.59` (Titanet/NeMo ECAPA). Nếu dùng SpeechBrain, giữ `0.61`.
+* **Benchmark công bằng**: báo cáo EER tại `0.409` (Titanet) hoặc `0.411` (NeMo ECAPA).
+* **Fallback Pyannote**: tránh dùng, nhưng nếu bắt buộc hãy tăng threshold (>0.45) để giảm merge, dù recall sẽ giảm mạnh.
 
 ---
 
-### **AUC: 0.9369**
+# 7. Kết luận gọn
 
-* Gần 0.94 → rất tốt
-* Curves cho thấy separation rõ ràng.
-
----
-
-# 4. Nguyên nhân chính khiến Pyannote embedding yếu
-
-### ❌ Pyannote community là model **segmentation-first**, embedding chỉ là phụ
-
-* Pyannote community pipeline không dùng ECAPA hoặc x-vector đời mới
-* Embedding của nó **thiết kế để hỗ trợ diarization pipeline của chính nó**, không phải để làm verification độc lập.
-
-### ❌ Được huấn luyện domain khác với dataset eval
-
-Dataset eval có:
-
-* whisper
-* falsetto
-* nonpara
-* high pitch
-
-  → Những style này **khác xa** các dataset mà Pyannote community dùng (mostly AMI/VoxConverse-style).
-
-### ❌ ECAPA (SpeechBrain) là model **speaker verification chuyên dụng**
-
-* Trained trên VoxCeleb2
-* Highly discriminative
-* Robust với pitch, noise, speaking style
-* Do đó cho score tốt hơn nhiều.
-
----
-
-# 5. Điều này nói gì cho bài toán **speaker diarization**
-
-### ✔ SpeechBrain ECAPA embedding sẽ cho:
-
-* Clustering tốt hơn
-* Ít merge nhầm speaker
-* Ít split
-* Affinity matrix sharp hơn
-* DER giảm mạnh
-
-### ✔ Pyannote embedding sẽ:
-
-* Nhiều false same-speaker → merge các người khác nhau
-* Nhiều miss same-speaker → split 1 speaker thành 2–3 cluster
-  → DER rất cao.
-
-Dựa trên **toàn bộ kết quả EER, PR, ROC, DET và phân bố score** mà bạn đã tính, ta có thể đưa ra **ngưỡng (threshold) tốt nhất** cho việc phân loại **same-speaker vs different-speaker** tùy mục đích sử dụng.
-
----
-
-# ✅ 1. Số liệu quan trọng (đã tính trước đó)
-
-### **SpeechBrain (ECAPA)**
-
-* **Threshold tại EER:** `0.3781`
-* **Threshold tại F1 tốt nhất:** `0.6130`
-* **Precision tại F1:** ~**0.99** (gần như không merge nhầm)
-* **AUC cao:** 0.937 → separable tốt
-
-### **Pyannote**
-
-* **Threshold tại EER:** `0.2995`
-* **Threshold tại F1:** `0.4175`
-  → Embedding yếu → threshold kém ổn định
-  => Không khuyến khích dùng để phân loại speaker.
-
-Vì vậy **ngưỡng chính cần chọn** là từ **SpeechBrain ECAPA**.
-
----
-
-# 🎯 2. Chọn threshold theo mục đích sử dụng
-
----
-
-## 🔵 Trường hợp 1: **Speaker diarization** (quan trọng nhất)
-
-Trong diarization, **merge nhầm** (false accept) gây hại nặng hơn split.
-
-→ Nên ưu tiên **Precision cao**, chấp nhận Recall thấp hơn.
-
-### **⇒ Ngưỡng tốt nhất: ~0.60 – 0.65 (theo F1-optimal)**
-
-#### **Đề xuất: `0.61`**
-
-Vì tại threshold ~0.61:
-
-* Precision ≈ **0.99** (hầu như không merge nhầm)
-* Recall ≈ **0.77**
-* Best-F1 đạt **86.7%**
-
-➡️ Đây là **ngưỡng lý tưởng để dùng cho clustering AHC/VBx** → tránh merge, giảm DER rất mạnh.
-
----
-
-## 🔵 Trường hợp 2: **Speaker verification tiêu chuẩn**
-
-Muốn cân bằng FAR = FRR (chuẩn benchmark)
-
-Dùng ngưỡng **EER**:
-
-### **⇒ Ngưỡng: `0.378`**
-
-Tại threshold này:
-
-* FAR = FRR ≈ 15.4%
-* F1 ≈ 78.6%
-* Dùng khi bạn cần so sánh fairness giữa các model.
-
----
-
-## 🔵 Trường hợp 3: **Muốn Recall cao (tránh split nhiều)**
-
-Nếu bạn sợ split nhiều, chấp nhận merge một chút:
-
-### **⇒ Ngưỡng: ~0.45–0.50**
-
-* Precision 90–95%
-* Recall > 85%
-
-Nhưng **không nên dùng cho diarization**, vì merge khó sửa.
-
----
-
-# 📌 3. Tổng hợp gợi ý chọn threshold (dễ đưa vào báo cáo)
-
-| Mục đích                      | Threshold similarity  | Lý do                              |
-| ----------------------------- | --------------------- | ---------------------------------- |
-| **Diarization (recommended)** | **0.60–0.65 (≈0.61)** | Precision ≈ 1.0 → không merge nhầm |
-| Verification cân bằng         | **0.378**             | FAR = FRR = EER                    |
-| Muốn recall cao               | **0.45–0.50**         | Ít split nhưng tăng merge          |
-
----
-
-# ⭐ 4. Lựa chọn cuối cùng (gọn gàng – thực tế)
-
-### **👉 Sử dụng `0.61` làm threshold phân biệt same/diff speaker.**
-
-Đây là ngưỡng:
-
-* tối ưu về F1
-* precision cực cao
-* phù hợp nhất khi đưa embedding vào **clustering (AHC, VBx, k-means)**
-* giúp giảm mạnh **speaker merge**, thứ gây sai lệch diarization nhiều nhất.
+* **NeMo Titanet / ECAPA TDNN** hiện là lựa chọn tốt nhất (EER ~14.7%, F1 ~87%).
+* **SpeechBrain ECAPA** là phương án nhẹ nhưng vẫn mạnh, dễ tích hợp.
+* **Pyannote** không đáp ứng yêu cầu, chỉ nên giữ cho mục đích tham khảo.
+* Với embedding mạnh, đặt threshold ~0.59–0.60 giúp tránh merge nhầm và kéo DER xuống rõ rệt trong mọi pipeline diarization.

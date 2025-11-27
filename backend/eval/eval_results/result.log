@@ -14,6 +14,22 @@ Precision@EER: 73.39% | Recall@EER: 84.63% | F1@EER: 78.61%
 Best F1: 86.70% | Precision@F1: 99.14% | Recall@F1: 77.03% | Thr(F1): 0.6130
 AUC: 0.9369
 
+=== Evaluating nemo_tianet embeddings ===
+Skipped 251/15000 trials due to missing embeddings
+Computing metrics on 14749 valid trials
+EER: 14.65% | FAR@EER: 14.65% | FRR@EER: 14.65% | Thr(EER): 0.4092
+Precision@EER: 74.46% | Recall@EER: 85.35% | F1@EER: 79.53%
+Best F1: 87.25% | Precision@F1: 97.56% | Recall@F1: 78.90% | Thr(F1): 0.5915
+AUC: 0.9417
+
+=== Evaluating nemo_ecapa_tdnn embeddings ===
+Skipped 251/15000 trials due to missing embeddings
+Computing metrics on 14749 valid trials
+EER: 14.95% | FAR@EER: 14.95% | FRR@EER: 14.96% | Thr(EER): 0.4114
+Precision@EER: 74.01% | Recall@EER: 85.04% | F1@EER: 79.14%
+Best F1: 87.27% | Precision@F1: 97.56% | Recall@F1: 78.94% | Thr(F1): 0.5926
+AUC: 0.9417
+
 === Plotting curves ===
 
 ROC curve saved to: eval_results/roc_curves.png
@@ -29,3 +45,11 @@ SpeechBrain: {'EER': 0.15364277933144577, 'threshold_at_EER': 0.3781467771103011
        1.        ], shape=(1926,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.97764228e-01, ...,
        2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1926,)), 'thresholds': array([        inf,  0.9400493 ,  0.70697628, ..., -0.06335743,
        -0.06396167, -0.17806255], shape=(1926,))}
+NeMo Titanet: {'EER': 0.1465249775221325, 'threshold_at_EER': 0.4092250378753265, 'FAR_at_EER': 0.1465052395971106, 'FRR_at_EER': 0.14654471544715442, 'precision_at_EER': 0.7446355736832772, 'recall_at_EER': 0.8534552845528456, 'F1_at_EER': 0.795340467847334, 'best_F1': 0.8724575795033149, 'threshold_at_best_F1': 0.5914630945239923, 'precision_at_best_F1': 0.9756220155818045, 'recall_at_best_F1': 0.7890243902439025, 'AUC': 0.9417264491090327, 'FAR_curve': array([0.        , 0.        , 0.        , ..., 0.98575644, 0.98575644,  
+       1.        ], shape=(1888,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.45325203e-01, ...,
+       2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1888,)), 'thresholds': array([        inf,  0.95404786,  0.71301672, ..., -0.02433496,
+       -0.02436331, -0.21396785], shape=(1888,))}
+NeMo Ecapa TDNN: {'EER': 0.14952459413697808, 'threshold_at_EER': 0.4114152495898431, 'FAR_at_EER': 0.14945569233899686, 'FRR_at_EER': 0.1495934959349593, 'precision_at_EER': 0.7401379798337167, 'recall_at_EER': 0.8504065040650407, 'F1_at_EER': 0.791449919606545, 'best_F1': 0.8727109313560274, 'threshold_at_best_F1': 0.5926270551780972, 'precision_at_best_F1': 0.9756342627480532, 'recall_at_best_F1': 0.7894308943089431, 'AUC': 0.9416869939377999, 'FAR_curve': array([0.        , 0.        , 0.        , ..., 0.96835894, 0.96835894,
+       1.        ], shape=(1838,)), 'FRR_curve': array([1.00000000e+00, 9.99796748e-01, 2.68902439e-01, ...,
+       2.03252033e-04, 0.00000000e+00, 0.00000000e+00], shape=(1838,)), 'thresholds': array([        inf,  0.95972115,  0.72892271, ...,  0.04003473,
+        0.03996694, -0.19377163], shape=(1838,))}
