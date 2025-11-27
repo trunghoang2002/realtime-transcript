@@ -295,7 +295,6 @@ Server sẽ chạy tại: `http://localhost:8917`
 
 **Yêu cầu:**
 - CUDA 12.1 đã được cài đặt
-- File `~/activate_cuda121.sh` để activate CUDA 12.1
 - Conda environment `v2t` đã được tạo và có các dependencies
 
 **Chạy server (Whisper-based):**
@@ -479,7 +478,6 @@ realtime-transcript/
 │   ├── main_whispersmall_qwenomni.py    # FastAPI server với Whisper Small + Qwen Omni
 │   │
 │   ├── requirements.txt                 # Python dependencies
-│   ├── constraints.txt                  # Version constraints cho dependencies
 │   │
 │   ├── scripts/                         # Scripts để chạy server với CUDA
 │   │   ├── activate_cuda_env.sh         # Script activate CUDA environment
@@ -515,6 +513,9 @@ realtime-transcript/
 │   │
 │   ├── eval/                            # Thư mục evaluation/testing
 │   │   ├── eval.py                      # Script đánh giá model
+│       ├── eval_asr.py                  # Script đánh giá asr trên jvs dataset
+│       ├── eval_diarization.py          # Script đánh giá asr trên jvs dataset
+│       ├── create_dataset.py            # Script tạo dataset
 │   │   ├── en/                          # Test cases tiếng Anh
 │   │   └── ja/                          # Test cases tiếng Nhật
 │   │
