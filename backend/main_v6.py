@@ -12,6 +12,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 # -------- Setup CUDA/cuDNN Library Path ----------
 # Tự động thêm cuDNN libraries vào LD_LIBRARY_PATH nếu chưa có
@@ -75,17 +77,24 @@ model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 
 # -------- Speaker Diarization model ----------
 # Preload speaker embedding model một lần để tránh load lại mỗi session
-from nemo_diarization import RealtimeSpeakerDiarization
+from fusion_diarization import RealtimeSpeakerDiarization
 import torch
 
 diarization_model = RealtimeSpeakerDiarization(
-    pretrained_speaker_model="titanet_large",
-    similarity_threshold=0.7,
+    models=['speechbrain', 'nemo'],
+    fusion_method="score_level",
+    fusion_weights=[0.4, 0.6],  # 40% SpeechBrain, 60% Nemo
+    model_configs={
+        'nemo': {
+            'pretrained_speaker_model': "titanet_large"
+        }
+    },
+    similarity_threshold=0.6,
     embedding_update_weight=0.3,
-    min_similarity_gap=0.3,
+    min_similarity_gap=0.25,
     skip_update_short_audio=True,
     min_duration_for_update=2.0,
-    init_similarity_threshold=0.4
+    init_similarity_threshold=0.3
 )
 
 def pad_audio_for_embedding(audio_f32: np.ndarray, min_audio_length = 8000) -> np.ndarray:

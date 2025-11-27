@@ -1,5 +1,5 @@
 """
-Fusion Speaker Diarization: Combines Pyannote and SpeechBrain embeddings
+Fusion Speaker Diarization: Combines multiple embedding models (Pyannote, SpeechBrain, NeMo)
 """
 import numpy as np
 import torch
@@ -8,28 +8,49 @@ from scipy.spatial.distance import cdist
 import soundfile as sf
 import tempfile
 
-# Import both diarization systems
+# Import all diarization systems
 from pyanote_diarization import RealtimeSpeakerDiarization as PyannoteRealtime
 from speechbrain_diarization import RealtimeSpeakerDiarization as SpeechBrainRealtime
+from nemo_diarization import RealtimeSpeakerDiarization as NemoRealtime
 
 
 class RealtimeSpeakerDiarization:
     """
-    Fusion Speaker Diarization combining Pyannote and SpeechBrain embeddings with session management
+    Fusion Speaker Diarization combining multiple embedding models (Pyannote, SpeechBrain, NeMo)
     
-    Supports multiple fusion strategies:
-    - concatenate: E = [E1 ; E2]
-    - normalized_average: E = (normalize(E1) + normalize(E2)) / 2
-    - weighted_average: E = α*normalize(E1) + (1-α)*normalize(E2)
-    - score_level: final_score = α*s1 + (1-α)*s2 (compares similarities separately)
-    - product: E = normalize(E1) ⊙ normalize(E2) (element-wise product)
-    - max_pool: E = max(normalize(E1), normalize(E2))
-    - learned_concat: E = [w1*E1 ; w2*E2] with learnable weights
+    Supports multiple fusion strategies for 2 or more models:
+    - concatenate: E = [E1 ; E2 ; ...]
+    - normalized_average: E = (normalize(E1) + normalize(E2) + ...) / n
+    - weighted_average: E = α*normalize(E1) + β*normalize(E2) + ... (with α + β + ... = 1)
+    - score_level: final_score = α*s1 + β*s2 + ... (with α + β + ... = 1)
+    - product: E = normalize(E1) ⊙ normalize(E2) ⊙ ... (element-wise product)
+    - max_pool: E = max(normalize(E1), normalize(E2), ...)
+    - learned_concat: E = [w1*E1 ; w2*E2 ; ...] with learnable weights
     
-    Note: Pyannote and SpeechBrain have different embedding dimensions (typically 256 vs 192).
+    Note: Different models have different embedding dimensions.
     The class handles dimension mismatch using the `dimension_alignment` parameter:
     - "min": Truncate to minimum dimension (default, preserves all info but discards extras)
     - "max" or "pad_zero": Pad with zeros to maximum dimension (keeps all dims but adds zeros)
+    
+    Multiple Instances of Same Model Type:
+    -------------------------------------
+    - You can use multiple instances of the same model type with different configs
+    - Use tuples to specify: (model_type, model_id)
+    - model_type: 'speechbrain', 'pyannote', or 'nemo'
+    - model_id: unique identifier for this instance
+    - Example:
+        models=[
+            ('nemo', 'nemo_tianet'),
+            ('nemo', 'nemo_ecapa_tdnn'),
+            ('pyannote', 'pyan_community'),
+            ('speechbrain', 'sb_default')
+        ]
+        model_configs={
+            'nemo_tianet': {'pretrained_speaker_model': 'titanet_large'},
+            'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+            'pyan_community': {'model_name': 'pyannote/speaker-diarization-community-1'},
+            'sb_default': {}
+        }
     
     Session Management:
     -------------------
@@ -42,10 +63,32 @@ class RealtimeSpeakerDiarization:
     Example Usage:
     --------------
     ```python
-    # Initialize pipeline
-    pipeline = RealtimeSpeakerDiarization(fusion_method="score_level")
+    # Example 1: Different model types
+    pipeline = RealtimeSpeakerDiarization(
+        models=['speechbrain', 'pyannote', 'nemo'],
+        fusion_method="score_level",
+        fusion_weights=[0.3, 0.4, 0.3]  # Must sum to 1 for weighted/score methods
+    )
     
-    # Process conversation 1
+    # Example 2: Multiple instances of same model type
+    pipeline = RealtimeSpeakerDiarization(
+        models=[
+            ('nemo', 'nemo_tianet'),
+            ('nemo', 'nemo_ecapa_tdnn'),
+            ('pyannote', 'pyan_community'),
+            ('speechbrain', 'sb_default')
+        ],
+        fusion_method="score_level",
+        fusion_weights=[0.3, 0.4, 0.3],
+        model_configs={
+            'nemo_tianet': {'pretrained_speaker_model': 'titanet_large'},
+            'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+            'pyan_community': {'model_name': 'pyannote/speaker-diarization-community-1'},
+            'sb_default': {}
+        }
+    )
+    
+    # Process conversation
     pipeline.set_session("meeting_1")
     output1 = pipeline("audio1.wav", use_memory=True, session_id="meeting_1")
     
@@ -60,60 +103,93 @@ class RealtimeSpeakerDiarization:
     """
     
     def __init__(self, 
+                 models=['speechbrain', 'pyannote'],  # List of models to use
                  fusion_method="normalized_average",  # Fusion strategy
-                 fusion_alpha=0.5,  # Weight for weighted/score fusion (0-1)
-                 fusion_weights=None,  # Custom weights for learned_concat [w1, w2]
+                 fusion_weights=None,  # Weights for weighted_average/score_level/learned_concat [w1, w2, ...]
                  dimension_alignment="max",  # How to handle dimension mismatch: "min", "max", "pad_zero"
-                 pyannote_config=None,  # Config dict for Pyannote
-                 speechbrain_config=None,  # Config dict for SpeechBrain
+                 model_configs=None,  # Dict of config dicts for each model {model_name/model_id: config}
                  similarity_threshold=0.7,
                  embedding_update_weight=0.3,
                  min_similarity_gap=0.3,
                  skip_update_short_audio=True,  # bật/tắt skip update cho audio ngắn
                  min_duration_for_update=2.0,  # duration tối thiểu (giây) để update embedding
                  init_similarity_threshold=0.4,  # threshold thấp hơn cho chunk thứ 2 sau init
-                 use_pyannote=True,  # Enable/disable Pyannote
-                 use_speechbrain=True,  # Enable/disable SpeechBrain
                  *args, **kwargs):
         """
-        Initialize Fusion Speaker Diarization
+        Initialize Fusion Speaker Diarization with multiple models
         
         Parameters
         ----------
+        models : list of str or list of tuple
+            List of models to use. Can be:
+            - List of strings: ['speechbrain', 'pyannote', 'nemo']
+            - List of tuples: [('pyannote', 'id1'), ('pyannote', 'id2'), ('speechbrain', 'id3')]
+              where each tuple is (model_type, model_id)
         fusion_method : str
             One of: "concatenate", "normalized_average", "weighted_average", 
                     "score_level", "product", "max_pool", "learned_concat"
-        fusion_alpha : float
-            Weight for weighted_average (Pyannote) or score_level fusion (0-1)
-        fusion_weights : tuple[float, float], optional
-            Custom weights for learned_concat: (w1, w2)
+        fusion_weights : list of float, optional
+            Weights for weighted_average/score_level/learned_concat: [w1, w2, ...]
+            Must sum to 1.0 for weighted_average and score_level
         dimension_alignment : str
             How to handle dimension mismatch: "min" (truncate), "max" (zero-pad), "pad_zero"
-        pyannote_config : dict, optional
-            Configuration for Pyannote (model_name, token, cache_dir, etc.)
-        speechbrain_config : dict, optional
-            Configuration for SpeechBrain (preloaded_model, etc.)
-        use_pyannote : bool
-            Whether to use Pyannote embeddings
-        use_speechbrain : bool
-            Whether to use SpeechBrain embeddings
+        model_configs : dict, optional
+            Configuration for each model {model_id: config_dict}
         """
-        self.fusion_method = fusion_method
-        self.fusion_alpha = fusion_alpha
-        self.fusion_weights = fusion_weights or (1.0, 1.0)
-        self.dimension_alignment = dimension_alignment
-        self.use_pyannote = use_pyannote
-        self.use_speechbrain = use_speechbrain
+        # Validate models list
+        if not models or len(models) < 2:
+            raise ValueError("At least 2 models must be specified for fusion")
         
-        # Validate: at least one system must be enabled
-        if not use_pyannote and not use_speechbrain:
-            raise ValueError("At least one diarization system (Pyannote or SpeechBrain) must be enabled")
+        # Parse models list - support both string and tuple formats
+        valid_model_types = ['speechbrain', 'pyannote', 'nemo']
+        self.model_instances = []  # List of (model_type, model_id)
+        
+        for i, model in enumerate(models):
+            if isinstance(model, tuple):
+                # Tuple format: (model_type, model_id)
+                if len(model) != 2:
+                    raise ValueError(f"Model tuple must have exactly 2 elements (model_type, model_id), got {model}")
+                model_type, model_id = model
+                if model_type not in valid_model_types:
+                    raise ValueError(f"Invalid model_type '{model_type}'. Valid types: {valid_model_types}")
+                self.model_instances.append((model_type, model_id))
+            elif isinstance(model, str):
+                # String format: backward compatible
+                if model not in valid_model_types:
+                    raise ValueError(f"Invalid model '{model}'. Valid models: {valid_model_types}")
+                # Use model name as both type and id
+                self.model_instances.append((model, model))
+            else:
+                raise ValueError(f"Model must be string or tuple, got {type(model)}")
+        
+        # Check for duplicate model_ids
+        model_ids = [mid for _, mid in self.model_instances]
+        if len(model_ids) != len(set(model_ids)):
+            raise ValueError(f"Duplicate model_ids found: {model_ids}. Each model instance must have a unique ID.")
+        
+        self.num_models = len(self.model_instances)
+        self.fusion_method = fusion_method
+        self.dimension_alignment = dimension_alignment
+        
+        # Handle fusion weights
+        if fusion_weights is None:
+            # Equal weights by default
+            self.fusion_weights = [1.0 / self.num_models] * self.num_models
+        else:
+            if len(fusion_weights) != self.num_models:
+                raise ValueError(f"fusion_weights length ({len(fusion_weights)}) must match number of models ({self.num_models})")
+            self.fusion_weights = fusion_weights
+        
+        # Validate weights for methods that require sum=1
+        if fusion_method in ['weighted_average', 'score_level']:
+            weight_sum = sum(self.fusion_weights)
+            if not np.isclose(weight_sum, 1.0, atol=1e-6):
+                raise ValueError(f"fusion_weights must sum to 1.0 for {fusion_method}, got {weight_sum}")
         
         # Initialize configurations
-        pyannote_config = pyannote_config or {}
-        speechbrain_config = speechbrain_config or {}
+        model_configs = model_configs or {}
         
-        # Shared parameters
+        # Shared parameters for all models
         shared_params = {
             'similarity_threshold': similarity_threshold,
             'embedding_update_weight': embedding_update_weight,
@@ -123,33 +199,44 @@ class RealtimeSpeakerDiarization:
             'init_similarity_threshold': init_similarity_threshold
         }
         
-        # Initialize both diarization systems
-        self.pyannote_diarizer = None
-        self.speechbrain_diarizer = None
+        # Initialize all diarization systems
+        self.diarizers = {}  # {model_id: diarizer_instance}
         
-        if use_pyannote:
+        for model_type, model_id in self.model_instances:
+            config = model_configs.get(model_id, {})
             try:
-                self.pyannote_diarizer = PyannoteRealtime(
-                    **{**pyannote_config, **shared_params}
-                )
-                if torch.cuda.is_available():
-                    self.pyannote_diarizer.to(torch.device("cuda"))
-                self.pyannote_diarizer.set_session("default")
-                print("✅ Pyannote diarization initialized")
+                if model_type == 'pyannote':
+                    diarizer = PyannoteRealtime(**{**config, **shared_params})
+                    if torch.cuda.is_available():
+                        diarizer.to(torch.device("cuda"))
+                    diarizer.set_session("default")
+                    self.diarizers[model_id] = diarizer
+                    print(f"✅ Pyannote diarization initialized (id: {model_id})")
+                    
+                elif model_type == 'speechbrain':
+                    diarizer = SpeechBrainRealtime(**{**config, **shared_params})
+                    diarizer.set_session("default")
+                    self.diarizers[model_id] = diarizer
+                    print(f"✅ SpeechBrain diarization initialized (id: {model_id})")
+                    
+                elif model_type == 'nemo':
+                    diarizer = NemoRealtime(**{**config, **shared_params})
+                    diarizer.set_session("default")
+                    self.diarizers[model_id] = diarizer
+                    print(f"✅ NeMo diarization initialized (id: {model_id})")
+                    
             except Exception as e:
-                print(f"⚠️  Failed to initialize Pyannote: {e}")
-                self.use_pyannote = False
+                print(f"⚠️  Failed to initialize {model_type} (id: {model_id}): {e}")
+                raise  # Raise error since all specified models must be initialized
         
-        if use_speechbrain:
-            try:
-                self.speechbrain_diarizer = SpeechBrainRealtime(
-                    **{**speechbrain_config, **shared_params}
-                )
-                self.speechbrain_diarizer.set_session("default")
-                print("✅ SpeechBrain diarization initialized")
-            except Exception as e:
-                print(f"⚠️  Failed to initialize SpeechBrain: {e}")
-                self.use_speechbrain = False
+        # Validate at least one model was successfully initialized
+        if not self.diarizers:
+            raise ValueError("No diarization models were successfully initialized")
+        
+        model_display = [f"{mt}({mid})" if mt != mid else mt for mt, mid in self.model_instances]
+        print(f"🎯 Fusion with {self.num_models} models: {model_display}")
+        print(f"   Method: {fusion_method}")
+        print(f"   Weights: {self.fusion_weights}")
         
         # Session management
         self.current_session_id: Optional[str] = None
@@ -178,20 +265,23 @@ class RealtimeSpeakerDiarization:
         
         if session_id not in self.sessions:
             # Tạo session mới
-            self.sessions[session_id] = {
+            session_data = {
                 'speaker_memory': {},  # Fused embeddings
                 'speaker_embedding_clusters': {},
                 'speaker_counts': {},
                 'speaker_history': [],
                 'total_chunks_processed': 0,
                 'next_speaker_id': 0,
-                'pyannote_memory': {},  # Pyannote EMA embeddings
-                'speechbrain_memory': {},  # SpeechBrain EMA embeddings
-                'pyannote_embeddings_cache': {},
-                'speechbrain_embeddings_cache': {},
                 'created_at': None,
                 'last_updated': None
             }
+            
+            # Add memory for each model instance
+            for model_type, model_id in self.model_instances:
+                session_data[f'{model_id}_memory'] = {}  # EMA embeddings per model
+                session_data[f'{model_id}_embeddings_cache'] = {}
+            
+            self.sessions[session_id] = session_data
             print(f"📝 Created new fusion session: {session_id}")
         
         return self.sessions[session_id]
@@ -208,11 +298,9 @@ class RealtimeSpeakerDiarization:
         self.current_session_id = session_id
         self._get_session_data(session_id)  # Đảm bảo session tồn tại
         
-        # Set session for underlying diarizers
-        if self.pyannote_diarizer:
-            self.pyannote_diarizer.set_session(session_id)
-        if self.speechbrain_diarizer:
-            self.speechbrain_diarizer.set_session(session_id)
+        # Set session for all underlying diarizers
+        for model_id, diarizer in self.diarizers.items():
+            diarizer.set_session(session_id)
         
         print(f"✅ Switched to fusion session: {session_id}")
     
@@ -260,27 +348,28 @@ class RealtimeSpeakerDiarization:
             raise ValueError("No session_id provided and no current session set.")
         
         if session_id in self.sessions:
-            self.sessions[session_id] = {
+            session_data = {
                 'speaker_memory': {},
                 'speaker_embedding_clusters': {},
                 'speaker_counts': {},
                 'speaker_history': [],
                 'total_chunks_processed': 0,
                 'next_speaker_id': 0,
-                'pyannote_memory': {},
-                'speechbrain_memory': {},
-                'pyannote_embeddings_cache': {},
-                'speechbrain_embeddings_cache': {},
                 'created_at': self.sessions[session_id].get('created_at'),
                 'last_updated': None
             }
+            
+            # Add memory for each model instance
+            for model_type, model_id in self.model_instances:
+                session_data[f'{model_id}_memory'] = {}
+                session_data[f'{model_id}_embeddings_cache'] = {}
+            
+            self.sessions[session_id] = session_data
             print(f"🔄 Reset fusion session: {session_id}")
             
-            # Reset underlying diarizers
-            if self.pyannote_diarizer:
-                self.pyannote_diarizer.reset_session(session_id)
-            if self.speechbrain_diarizer:
-                self.speechbrain_diarizer.reset_session(session_id)
+            # Reset all underlying diarizers
+            for model_id, diarizer in self.diarizers.items():
+                diarizer.reset_session(session_id)
         else:
             print(f"⚠️  Session not found: {session_id}")
     
@@ -291,43 +380,49 @@ class RealtimeSpeakerDiarization:
             return embedding
         return embedding / norm
     
-    def _align_dimensions(self, emb1: np.ndarray, emb2: np.ndarray) -> tuple:
+    def _align_dimensions(self, *embeddings: np.ndarray) -> List[np.ndarray]:
         """
-        Align two embeddings to have the same dimension
+        Align multiple embeddings to have the same dimension
         
         Parameters
         ----------
-        emb1, emb2 : np.ndarray
+        *embeddings : np.ndarray
             Input embeddings (may have different dimensions)
             
         Returns
         -------
-        aligned_emb1, aligned_emb2 : tuple[np.ndarray, np.ndarray]
+        aligned_embeddings : List[np.ndarray]
             Aligned embeddings with same dimension
         """
-        dim1, dim2 = len(emb1), len(emb2)
+        if len(embeddings) == 0:
+            return []
         
-        if dim1 == dim2:
-            return emb1, emb2
+        # Get all dimensions
+        dimensions = [len(emb) for emb in embeddings]
+        
+        # If all same, return as is
+        if len(set(dimensions)) == 1:
+            return list(embeddings)
         
         if self.dimension_alignment == "min":
             # Truncate to minimum dimension
-            min_dim = min(dim1, dim2)
-            return emb1[:min_dim], emb2[:min_dim]
+            min_dim = min(dimensions)
+            return [emb[:min_dim] for emb in embeddings]
         
         elif self.dimension_alignment in ["max", "pad_zero"]:
             # Pad with zeros to maximum dimension
-            max_dim = max(dim1, dim2)
-            aligned_emb1 = np.zeros(max_dim)
-            aligned_emb2 = np.zeros(max_dim)
-            aligned_emb1[:dim1] = emb1
-            aligned_emb2[:dim2] = emb2
-            return aligned_emb1, aligned_emb2
+            max_dim = max(dimensions)
+            aligned_embeddings = []
+            for emb in embeddings:
+                aligned_emb = np.zeros(max_dim)
+                aligned_emb[:len(emb)] = emb
+                aligned_embeddings.append(aligned_emb)
+            return aligned_embeddings
         
         else:
             # Default: use minimum dimension
-            min_dim = min(dim1, dim2)
-            return emb1[:min_dim], emb2[:min_dim]
+            min_dim = min(dimensions)
+            return [emb[:min_dim] for emb in embeddings]
     
     def _cosine(self, a, b):
         """Compute cosine similarity with NaN handling"""
@@ -352,81 +447,89 @@ class RealtimeSpeakerDiarization:
         """Compute euclidean distance"""
         return cdist([a], [b], metric="euclidean")[0, 0]
 
-    def _fuse_embeddings(self, 
-                        pyannote_emb: Optional[np.ndarray], 
-                        speechbrain_emb: Optional[np.ndarray]) -> np.ndarray:
+    def _fuse_embeddings(self, *embeddings: Optional[np.ndarray]) -> np.ndarray:
         """
-        Fuse embeddings from both systems based on fusion_method
+        Fuse embeddings from multiple models based on fusion_method
         
         Parameters
         ----------
-        pyannote_emb : np.ndarray or None
-            Pyannote embedding
-        speechbrain_emb : np.ndarray or None
-            SpeechBrain embedding
+        *embeddings : Optional[np.ndarray]
+            Embeddings from each model (in order of self.models)
             
         Returns
         -------
         fused_emb : np.ndarray
             Fused embedding
         """
-        # Handle single-system cases
-        if pyannote_emb is None and speechbrain_emb is None:
-            raise ValueError("At least one embedding must be provided")
-        if pyannote_emb is None or np.all(pyannote_emb == 0):
-            return speechbrain_emb
-        if speechbrain_emb is None or np.all(speechbrain_emb == 0):
-            return pyannote_emb
+        # Filter out None and zero embeddings
+        valid_embeddings = [
+            emb for emb in embeddings 
+            if emb is not None and not np.all(emb == 0)
+        ]
         
-        norm_pyannote = self._normalize_embedding(pyannote_emb)
-        norm_speechbrain = self._normalize_embedding(speechbrain_emb)
+        if len(valid_embeddings) == 0:
+            raise ValueError("At least one valid embedding must be provided")
+        
+        # If only one valid embedding, return it
+        if len(valid_embeddings) == 1:
+            return valid_embeddings[0]
+        
+        # Normalize all embeddings
+        norm_embeddings = [self._normalize_embedding(emb) for emb in valid_embeddings]
 
         # Fusion strategies
         if self.fusion_method == "concatenate":
-            # Simple concatenation: E = [E1 ; E2]
-            fused = np.concatenate([pyannote_emb, speechbrain_emb])
+            # Simple concatenation: E = [E1 ; E2 ; ...]
+            fused = np.concatenate(valid_embeddings)
             
         elif self.fusion_method == "normalized_average":
-            # Average of normalized embeddings: E = (norm(E1) + norm(E2)) / 2
-            # Handle dimension mismatch using alignment strategy
-            aligned_pyannote, aligned_speechbrain = self._align_dimensions(norm_pyannote, norm_speechbrain)
-            fused = (aligned_pyannote + aligned_speechbrain) / 2
-            fused = self._normalize_embedding(fused)  # Re-normalize
+            # Average of normalized embeddings: E = (norm(E1) + norm(E2) + ...) / n
+            aligned_embeddings = self._align_dimensions(*norm_embeddings)
+            fused = np.mean(aligned_embeddings, axis=0)
+            fused = self._normalize_embedding(fused)
             
         elif self.fusion_method == "weighted_average":
-            # Weighted average: E = α*norm(E1) + (1-α)*norm(E2)
-            # Handle dimension mismatch using alignment strategy
-            aligned_pyannote, aligned_speechbrain = self._align_dimensions(norm_pyannote, norm_speechbrain)
-            fused = self.fusion_alpha * aligned_pyannote + (1 - self.fusion_alpha) * aligned_speechbrain
+            # Weighted average: E = α*norm(E1) + β*norm(E2) + ...
+            aligned_embeddings = self._align_dimensions(*norm_embeddings)
+            # Use weights for valid embeddings only
+            valid_weights = self.fusion_weights[:len(valid_embeddings)]
+            weight_sum = sum(valid_weights)
+            normalized_weights = [w / weight_sum for w in valid_weights]
+            
+            fused = np.zeros_like(aligned_embeddings[0])
+            for i, emb in enumerate(aligned_embeddings):
+                fused += normalized_weights[i] * emb
             fused = self._normalize_embedding(fused)
             
         elif self.fusion_method == "product":
             # Element-wise product of normalized embeddings
-            # Handle dimension mismatch using alignment strategy
-            aligned_pyannote, aligned_speechbrain = self._align_dimensions(norm_pyannote, norm_speechbrain)
-            fused = aligned_pyannote * aligned_speechbrain
+            aligned_embeddings = self._align_dimensions(*norm_embeddings)
+            fused = aligned_embeddings[0]
+            for emb in aligned_embeddings[1:]:
+                fused = fused * emb
             fused = self._normalize_embedding(fused)
             
         elif self.fusion_method == "max_pool":
             # Max pooling of normalized embeddings
-            # Handle dimension mismatch using alignment strategy
-            aligned_pyannote, aligned_speechbrain = self._align_dimensions(norm_pyannote, norm_speechbrain)
-            fused = np.maximum(aligned_pyannote, aligned_speechbrain)
+            aligned_embeddings = self._align_dimensions(*norm_embeddings)
+            fused = np.maximum.reduce(aligned_embeddings)
             fused = self._normalize_embedding(fused)
             
         elif self.fusion_method == "learned_concat":
-            # Weighted concatenation: E = [w1*E1 ; w2*E2]
-            w1, w2 = self.fusion_weights
-            weighted_pyannote = w1 * pyannote_emb
-            weighted_speechbrain = w2 * speechbrain_emb
-            fused = np.concatenate([weighted_pyannote, weighted_speechbrain])
+            # Weighted concatenation: E = [w1*E1 ; w2*E2 ; ...]
+            weighted_embeddings = []
+            for i, emb in enumerate(valid_embeddings):
+                w = self.fusion_weights[i] if i < len(self.fusion_weights) else 1.0
+                weighted_embeddings.append(w * emb)
+            fused = np.concatenate(weighted_embeddings)
             fused = self._normalize_embedding(fused)
             
         elif self.fusion_method == "score_level":
-            # Score-level fusion doesn't fuse embeddings
-            # Returns concatenation as placeholder (not used for matching)
-            # Actual score fusion happens in _fuse_score where individual embeddings are compared
-            fused = np.concatenate([norm_pyannote, norm_speechbrain])
+            # Score-level fusion doesn't fuse embeddings here
+            # Actual score fusion happens in _fuse_score
+            # Return concatenation as placeholder
+            aligned_embeddings = self._align_dimensions(*norm_embeddings)
+            fused = np.concatenate(aligned_embeddings)
             fused = self._normalize_embedding(fused)
             
         else:
@@ -435,23 +538,17 @@ class RealtimeSpeakerDiarization:
         return fused
     
     def _fuse_score(self, 
-                    new_emb_pyannote: np.ndarray,
-                    new_emb_speechbrain: np.ndarray,
-                    memory_emb_pyannote: np.ndarray,
-                    memory_emb_speechbrain: np.ndarray) -> float:
+                    new_embeddings: List[Optional[np.ndarray]],
+                    memory_embeddings: List[Optional[np.ndarray]]) -> float:
         """
-        Compute similarity using score-level fusion
+        Compute similarity using score-level fusion for multiple models
         
         Parameters
         ----------
-        new_emb_pyannote : np.ndarray
-            New Pyannote embedding
-        new_emb_speechbrain : np.ndarray
-            New SpeechBrain embedding
-        memory_emb_pyannote : np.ndarray
-            Memory Pyannote embedding
-        memory_emb_speechbrain : np.ndarray
-            Memory SpeechBrain embedding
+        new_embeddings : List[Optional[np.ndarray]]
+            New embeddings from each model (in order of self.models)
+        memory_embeddings : List[Optional[np.ndarray]]
+            Memory embeddings from each model (in order of self.models)
             
         Returns
         -------
@@ -459,108 +556,133 @@ class RealtimeSpeakerDiarization:
             Fused similarity score
         """
         # Compute individual similarities
-        if self.embedding_metric == "cosine":
-            sim_pyannote = self._cosine(new_emb_pyannote, memory_emb_pyannote)
-            sim_speechbrain = self._cosine(new_emb_speechbrain, memory_emb_speechbrain)
-        else:
-            dist_pyannote = self._euclidean(new_emb_pyannote, memory_emb_pyannote)
-            dist_speechbrain = self._euclidean(new_emb_speechbrain, memory_emb_speechbrain)
-            sim_pyannote = 1 / (1 + dist_pyannote)
-            sim_speechbrain = 1 / (1 + dist_speechbrain)
+        similarities = []
+        valid_weights = []
+        
+        for i in range(len(new_embeddings)):
+            new_emb = new_embeddings[i]
+            mem_emb = memory_embeddings[i]
+            
+            if new_emb is None or mem_emb is None:
+                continue
+            
+            if self.embedding_metric == "cosine":
+                sim = self._cosine(new_emb, mem_emb)
+            else:
+                dist = self._euclidean(new_emb, mem_emb)
+                sim = 1 / (1 + dist)
+            
+            similarities.append(sim)
+            valid_weights.append(self.fusion_weights[i] if i < len(self.fusion_weights) else 1.0)
+        
+        if len(similarities) == 0:
+            return 0.0
         
         # Weighted fusion of scores
-        fused_score = self.fusion_alpha * sim_pyannote + (1 - self.fusion_alpha) * sim_speechbrain
+        weight_sum = sum(valid_weights)
+        normalized_weights = [w / weight_sum for w in valid_weights]
+        
+        fused_score = sum(w * s for w, s in zip(normalized_weights, similarities))
         
         # Check for NaN in final result
         if np.isnan(fused_score):
-            print(f"⚠️  Warning: NaN in fused_score! sim_pyannote={sim_pyannote:.3f}, sim_speechbrain={sim_speechbrain:.3f}")
+            print(f"⚠️  Warning: NaN in fused_score! similarities={similarities}")
             return 0.0
         
         return fused_score
     
     def _extract_embeddings(self, file_or_audio_f32: Union[str, np.ndarray], max_speakers: Optional[int] = None) -> Dict:
         """
-        Extract embeddings from both systems
+        Extract embeddings from all models
         
         Returns
         -------
         result : dict
             {
-                'pyannote_embeddings': np.ndarray or None,
-                'speechbrain_embeddings': np.ndarray or None,
-                'pyannote_labels': List[str] or None,
-                'speechbrain_labels': List[str] or None
+                '<model_name/model_id>_embeddings': np.ndarray or None,
+                '<model_name/model_id>_labels': List[str] or None,
+                ...
             }
+        outputs : dict
+            Raw outputs from each model
         """
-        result = {
-            'pyannote_embeddings': None,
-            'speechbrain_embeddings': None,
-            'pyannote_labels': None,
-            'speechbrain_labels': None
-        }
+        result = {}
+        outputs = {}
         
-        # Extract from Pyannote
-        pyannote_output = None
-        if self.use_pyannote and self.pyannote_diarizer:
+        for model_type, model_id in self.model_instances:
+            result[f'{model_id}_embeddings'] = None
+            result[f'{model_id}_labels'] = None
+        
+        # Extract from each model
+        for model_id, diarizer in self.diarizers.items():
+            # Get model type from model_instances
+            model_type = None
+            for mt, mid in self.model_instances:
+                if mid == model_id:
+                    model_type = mt
+                    break
+            
+            if model_type is None:
+                continue
+                
             try:
-                if isinstance(file_or_audio_f32, np.ndarray):
-                    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_file:
-                        tmp_path = tmp_file.name
-                        sf.write(tmp_path, file_or_audio_f32, 16000, format="WAV")
-                        pyannote_output = self.pyannote_diarizer(
-                            tmp_path,
+                if model_type == 'pyannote':
+                    # Pyannote requires file path
+                    if isinstance(file_or_audio_f32, np.ndarray):
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                            tmp_path = tmp_file.name
+                            sf.write(tmp_path, file_or_audio_f32, 16000, format="WAV")
+                            output = diarizer(
+                                tmp_path,
+                                max_speakers=max_speakers,
+                                use_memory=False
+                            )
+                        os.unlink(tmp_path)
+                    else:
+                        output = diarizer(
+                            file_or_audio_f32,
                             max_speakers=max_speakers,
-                            use_memory=False  # We manage memory ourselves
+                            use_memory=False
                         )
-                else:
-                    pyannote_output = self.pyannote_diarizer(
+                    
+                    if output.speaker_embeddings is not None:
+                        result[f'{model_id}_embeddings'] = output.speaker_embeddings
+                        result[f'{model_id}_labels'] = list(output.speaker_diarization.labels())
+                        print(f"[{model_type.capitalize()}({model_id})] Extracted {len(result[f'{model_id}_labels'])} speakers: {result[f'{model_id}_labels']}")
+                    outputs[model_id] = output
+                    
+                else:  # speechbrain or nemo
+                    output = diarizer(
                         file_or_audio_f32,
                         max_speakers=max_speakers,
-                        use_memory=False  # We manage memory ourselves
+                        use_memory=False
                     )
-                if pyannote_output.speaker_embeddings is not None:
-                    result['pyannote_embeddings'] = pyannote_output.speaker_embeddings
-                    result['pyannote_labels'] = list(pyannote_output.speaker_diarization.labels())
-                    print(f"[Pyannote] Extracted {len(result['pyannote_labels'])} speakers: {result['pyannote_labels']}")
+                    
+                    if output.get('speaker_embeddings') is not None:
+                        result[f'{model_id}_embeddings'] = output['speaker_embeddings']
+                        result[f'{model_id}_labels'] = output.get('speaker_labels', ['SPEAKER_00'])
+                        print(f"[{model_type.capitalize()}({model_id})] Extracted {len(result[f'{model_id}_labels'])} speakers: {result[f'{model_id}_labels']}")
+                    outputs[model_id] = output
+                    
             except Exception as e:
-                print(f"⚠️  Pyannote extraction failed: {e}")
+                print(f"⚠️  {model_type.capitalize()}({model_id}) extraction failed: {e}")
+                outputs[model_id] = None
         
-        # Extract from SpeechBrain
-        speechbrain_output = None
-        if self.use_speechbrain and self.speechbrain_diarizer:
-            try:
-                speechbrain_output = self.speechbrain_diarizer(
-                    file_or_audio_f32,
-                    max_speakers=max_speakers,
-                    use_memory=False  # We manage memory ourselves
-                )
-                if speechbrain_output.get('speaker_embeddings') is not None:
-                    result['speechbrain_embeddings'] = speechbrain_output['speaker_embeddings']
-                    result['speechbrain_labels'] = speechbrain_output.get('speaker_labels', ['SPEAKER_00'])
-                    print(f"[SpeechBrain] Extracted {len(result['speechbrain_labels'])} speakers: {result['speechbrain_labels']}")
-            except Exception as e:
-                print(f"⚠️  SpeechBrain extraction failed: {e}")
-        
-        return result, pyannote_output, speechbrain_output
+        return result, outputs
     
     def _match_speakers_with_memory(self, 
-                                   new_embeddings_pyannote: Optional[np.ndarray],
-                                   new_embeddings_speechbrain: Optional[np.ndarray],
+                                   new_embeddings_dict: Dict[str, Optional[np.ndarray]],
                                    new_labels: List[str],
                                    max_speakers: Optional[int] = None,
                                    session_id: Optional[str] = None,
                                    audio_duration: Optional[float] = None) -> Dict[str, str]:
         """
-        Match speakers with memory using fused embeddings
-        
-        Similar to individual systems but uses fused embeddings for matching
+        Match speakers with memory using fused embeddings from multiple models
         
         Parameters
         ----------
-        new_embeddings_pyannote : np.ndarray
-            New Pyannote embeddings
-        new_embeddings_speechbrain : np.ndarray
-            New SpeechBrain embeddings
+        new_embeddings_dict : Dict[str, Optional[np.ndarray]]
+            Dictionary of embeddings from each model {model_name/model_id: embeddings}
         new_labels : List[str]
             New labels
         max_speakers : int, optional
@@ -574,8 +696,12 @@ class RealtimeSpeakerDiarization:
         speaker_memory = session_data['speaker_memory']
         speaker_embedding_clusters = session_data['speaker_embedding_clusters']
         speaker_counts = session_data['speaker_counts']
-        pyannote_memory = session_data['pyannote_memory']
-        speechbrain_memory = session_data['speechbrain_memory']
+        
+        # Get memory for each model instance
+        model_memories = {
+            model_id: session_data[f'{model_id}_memory']
+            for model_type, model_id in self.model_instances
+        }
         
         # Kiểm tra xem có nên update embedding hay không dựa vào duration
         should_update_embedding = True
@@ -597,24 +723,27 @@ class RealtimeSpeakerDiarization:
         fused_new_embeddings = []
         
         for i in range(num_speakers):
-            pyannote_emb = new_embeddings_pyannote[i] if new_embeddings_pyannote is not None else None
-            speechbrain_emb = new_embeddings_speechbrain[i] if new_embeddings_speechbrain is not None else None
+            # Get embeddings from all model instances for this speaker
+            model_embeddings = []
+            for model_type, model_id in self.model_instances:
+                emb_array = new_embeddings_dict.get(f'{model_id}_embeddings')
+                if emb_array is not None and i < len(emb_array):
+                    emb = emb_array[i]
+                    model_embeddings.append(emb)
+                    
+                    # Debug: Check for zero embeddings
+                    emb_norm = np.linalg.norm(emb)
+                    if emb_norm == 0:
+                        print(f"⚠️  Warning: {model_type}({model_id}) embedding {i} is zero vector!")
+                else:
+                    model_embeddings.append(None)
             
-            if pyannote_emb is None and speechbrain_emb is None:
+            # Check if all embeddings are None
+            if all(emb is None for emb in model_embeddings):
                 continue
             
-            # Debug: Check for zero embeddings
-            if pyannote_emb is not None:
-                pyannote_norm = np.linalg.norm(pyannote_emb)
-                if pyannote_norm == 0:
-                    print(f"⚠️  Warning: Pyannote embedding {i} is zero vector!")
-            
-            if speechbrain_emb is not None:
-                speechbrain_norm = np.linalg.norm(speechbrain_emb)
-                if speechbrain_norm == 0:
-                    print(f"⚠️  Warning: SpeechBrain embedding {i} is zero vector!")
-                
-            fused_emb = self._fuse_embeddings(pyannote_emb, speechbrain_emb)
+            # Fuse embeddings
+            fused_emb = self._fuse_embeddings(*model_embeddings)
             
             # Check fused embedding
             fused_norm = np.linalg.norm(fused_emb)
@@ -642,11 +771,13 @@ class RealtimeSpeakerDiarization:
                 speaker_embedding_clusters[speaker_id] = [fused_new_embeddings[i].copy()]
                 speaker_counts[speaker_id] = 1
                 
-                # Store individual embeddings for score-level fusion
-                if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote) and not np.all(new_embeddings_pyannote[i] == 0):
-                    pyannote_memory[speaker_id] = new_embeddings_pyannote[i].copy()
-                if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain) and not np.all(new_embeddings_speechbrain[i] == 0):
-                    speechbrain_memory[speaker_id] = new_embeddings_speechbrain[i].copy()
+                # Store individual embeddings for each model instance
+                for model_type, model_id in self.model_instances:
+                    emb_array = new_embeddings_dict.get(f'{model_id}_embeddings')
+                    if emb_array is not None and i < len(emb_array):
+                        emb = emb_array[i]
+                        if not np.all(emb == 0):
+                            model_memories[model_id][speaker_id] = emb.copy()
                 
                 print(f"[Fusion] Creating new speaker: {speaker_id}")
             
@@ -670,35 +801,24 @@ class RealtimeSpeakerDiarization:
             similarities_ema = np.zeros((num_speakers, len(memory_speaker_ids)))
             
             for i in range(num_speakers):
-                pyannote_emb_new = new_embeddings_pyannote[i] if new_embeddings_pyannote is not None else None
-                speechbrain_emb_new = new_embeddings_speechbrain[i] if new_embeddings_speechbrain is not None else None
+                # Get new embeddings from all model instances for speaker i
+                new_model_embeddings = []
+                for model_type, model_id in self.model_instances:
+                    emb_array = new_embeddings_dict.get(f'{model_id}_embeddings')
+                    if emb_array is not None and i < len(emb_array):
+                        new_model_embeddings.append(emb_array[i])
+                    else:
+                        new_model_embeddings.append(None)
                 
                 for j, speaker_id in enumerate(memory_speaker_ids):
-                    pyannote_emb_mem = pyannote_memory.get(speaker_id)
-                    speechbrain_emb_mem = speechbrain_memory.get(speaker_id)
+                    # Get memory embeddings from all model instances for this speaker
+                    mem_model_embeddings = []
+                    for model_type, model_id in self.model_instances:
+                        mem = model_memories[model_id].get(speaker_id)
+                        mem_model_embeddings.append(mem)
                     
-                    # Use the _fuse_score helper method for score-level fusion
-                    if (pyannote_emb_new is not None and pyannote_emb_mem is not None and 
-                        speechbrain_emb_new is not None and speechbrain_emb_mem is not None):
-                        # Both embeddings available - use fuse_score
-                        fused_sim = self._fuse_score(pyannote_emb_new, speechbrain_emb_new,
-                                                     pyannote_emb_mem, speechbrain_emb_mem)
-                    elif pyannote_emb_new is not None and pyannote_emb_mem is not None:
-                        # Only Pyannote available
-                        if self.embedding_metric == "cosine":
-                            fused_sim = self._cosine(pyannote_emb_new, pyannote_emb_mem)
-                        else:
-                            dist = self._euclidean(pyannote_emb_new, pyannote_emb_mem)
-                            fused_sim = 1 / (1 + dist)
-                    elif speechbrain_emb_new is not None and speechbrain_emb_mem is not None:
-                        # Only SpeechBrain available
-                        if self.embedding_metric == "cosine":
-                            fused_sim = self._cosine(speechbrain_emb_new, speechbrain_emb_mem)
-                        else:
-                            dist = self._euclidean(speechbrain_emb_new, speechbrain_emb_mem)
-                            fused_sim = 1 / (1 + dist)
-                    else:
-                        fused_sim = 0.0
+                    # Use _fuse_score for score-level fusion
+                    fused_sim = self._fuse_score(new_model_embeddings, mem_model_embeddings)
                     
                     # Additional NaN check
                     if np.isnan(fused_sim):
@@ -767,31 +887,21 @@ class RealtimeSpeakerDiarization:
                     
                     # For score-level fusion, also update individual embeddings
                     if self.fusion_method == "score_level":
-                        # Update Pyannote embedding
-                        if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
-                            pyannote_emb_new = new_embeddings_pyannote[i]
-                            if matched_speaker_id in pyannote_memory:
-                                old_pyannote = pyannote_memory[matched_speaker_id]
-                                updated_pyannote = (1 - self.embedding_update_weight) * old_pyannote + \
-                                                 self.embedding_update_weight * pyannote_emb_new
-                                if self.embedding_metric == "cosine":
-                                    updated_pyannote = self._normalize_embedding(updated_pyannote)
-                                pyannote_memory[matched_speaker_id] = updated_pyannote
-                            else:
-                                pyannote_memory[matched_speaker_id] = pyannote_emb_new.copy()
-                        
-                        # Update SpeechBrain embedding
-                        if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
-                            speechbrain_emb_new = new_embeddings_speechbrain[i]
-                            if matched_speaker_id in speechbrain_memory:
-                                old_speechbrain = speechbrain_memory[matched_speaker_id]
-                                updated_speechbrain = (1 - self.embedding_update_weight) * old_speechbrain + \
-                                                    self.embedding_update_weight * speechbrain_emb_new
-                                if self.embedding_metric == "cosine":
-                                    updated_speechbrain = self._normalize_embedding(updated_speechbrain)
-                                speechbrain_memory[matched_speaker_id] = updated_speechbrain
-                            else:
-                                speechbrain_memory[matched_speaker_id] = speechbrain_emb_new.copy()
+                        for model_type, model_id in self.model_instances:
+                            emb_array = new_embeddings_dict.get(f'{model_id}_embeddings')
+                            if emb_array is not None and i < len(emb_array):
+                                new_model_emb = emb_array[i]
+                                model_mem = model_memories[model_id]
+                                
+                                if matched_speaker_id in model_mem:
+                                    old_model_emb = model_mem[matched_speaker_id]
+                                    updated_model_emb = (1 - self.embedding_update_weight) * old_model_emb + \
+                                                       self.embedding_update_weight * new_model_emb
+                                    if self.embedding_metric == "cosine":
+                                        updated_model_emb = self._normalize_embedding(updated_model_emb)
+                                    model_mem[matched_speaker_id] = updated_model_emb
+                                else:
+                                    model_mem[matched_speaker_id] = new_model_emb.copy()
                     
                     # Add to cluster
                     cluster = speaker_embedding_clusters[matched_speaker_id]
@@ -839,29 +949,21 @@ class RealtimeSpeakerDiarization:
                         
                         # For score-level fusion, also update individual embeddings
                         if self.fusion_method == "score_level":
-                            if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
-                                pyannote_emb_new = new_embeddings_pyannote[i]
-                                if matched_speaker_id in pyannote_memory:
-                                    old_pyannote = pyannote_memory[matched_speaker_id]
-                                    updated_pyannote = (1 - self.embedding_update_weight) * old_pyannote + \
-                                                     self.embedding_update_weight * pyannote_emb_new
-                                    if self.embedding_metric == "cosine":
-                                        updated_pyannote = self._normalize_embedding(updated_pyannote)
-                                    pyannote_memory[matched_speaker_id] = updated_pyannote
-                                else:
-                                    pyannote_memory[matched_speaker_id] = pyannote_emb_new.copy()
-                            
-                            if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
-                                speechbrain_emb_new = new_embeddings_speechbrain[i]
-                                if matched_speaker_id in speechbrain_memory:
-                                    old_speechbrain = speechbrain_memory[matched_speaker_id]
-                                    updated_speechbrain = (1 - self.embedding_update_weight) * old_speechbrain + \
-                                                        self.embedding_update_weight * speechbrain_emb_new
-                                    if self.embedding_metric == "cosine":
-                                        updated_speechbrain = self._normalize_embedding(updated_speechbrain)
-                                    speechbrain_memory[matched_speaker_id] = updated_speechbrain
-                                else:
-                                    speechbrain_memory[matched_speaker_id] = speechbrain_emb_new.copy()
+                            for model_type, model_id in self.model_instances:
+                                emb_array = new_embeddings_dict.get(f'{model_id}_embeddings')
+                                if emb_array is not None and i < len(emb_array):
+                                    new_model_emb = emb_array[i]
+                                    model_mem = model_memories[model_id]
+                                    
+                                    if matched_speaker_id in model_mem:
+                                        old_model_emb = model_mem[matched_speaker_id]
+                                        updated_model_emb = (1 - self.embedding_update_weight) * old_model_emb + \
+                                                           self.embedding_update_weight * new_model_emb
+                                        if self.embedding_metric == "cosine":
+                                            updated_model_emb = self._normalize_embedding(updated_model_emb)
+                                        model_mem[matched_speaker_id] = updated_model_emb
+                                    else:
+                                        model_mem[matched_speaker_id] = new_model_emb.copy()
                         
                         cluster = speaker_embedding_clusters[matched_speaker_id]
                         cluster.append(new_embedding.copy())
@@ -884,11 +986,11 @@ class RealtimeSpeakerDiarization:
                     speaker_embedding_clusters[speaker_id] = [new_embedding.copy()]
                     speaker_counts[speaker_id] = 1
                     
-                    # Store individual embeddings for score-level fusion
-                    if new_embeddings_pyannote is not None and i < len(new_embeddings_pyannote):
-                        pyannote_memory[speaker_id] = new_embeddings_pyannote[i].copy()
-                    if new_embeddings_speechbrain is not None and i < len(new_embeddings_speechbrain):
-                        speechbrain_memory[speaker_id] = new_embeddings_speechbrain[i].copy()
+                    # Store individual embeddings for each model instance
+                    for model_type, model_id in self.model_instances:
+                        emb_array = new_embeddings_dict.get(f'{model_id}_embeddings')
+                        if emb_array is not None and i < len(emb_array):
+                            model_memories[model_id][speaker_id] = emb_array[i].copy()
                     
                     print(f"  🆕 Created new speaker: {speaker_id}")
         
@@ -945,81 +1047,78 @@ class RealtimeSpeakerDiarization:
         except Exception as e:
             print(f"⚠️  Could not calculate audio duration: {e}; file_or_audio_f32: {file_or_audio_f32}")
         
-        # Extract embeddings from both systems
-        extracted, pyannote_output, speechbrain_output = self._extract_embeddings(file_or_audio_f32, max_speakers=max_speakers)
+        # Extract embeddings from all models
+        extracted, outputs = self._extract_embeddings(file_or_audio_f32, max_speakers=max_speakers)
         
-        pyannote_embeddings = extracted['pyannote_embeddings']
-        speechbrain_embeddings = extracted['speechbrain_embeddings']
-        pyannote_labels = extracted['pyannote_labels']
-        speechbrain_labels = extracted['speechbrain_labels']
+        # Check if any valid embeddings were extracted
+        has_valid_embeddings = False
+        all_labels = []
         
-        # Check if all pyannote labels are SPEAKER_UNK (invalid embeddings)
-        pyannote_all_unknown = False
-        if pyannote_labels:
-            pyannote_all_unknown = all(label == "SPEAKER_UNK" for label in pyannote_labels)
-            if pyannote_all_unknown:
-                print("⚠️  All Pyannote speakers are SPEAKER_UNK (invalid embeddings)")
-                print("✅ Using SpeechBrain results only (skipping fusion)")
+        for model_type, model_id in self.model_instances:
+            labels = extracted.get(f'{model_id}_labels')
+            if labels:
+                # Check if labels are valid (not all SPEAKER_UNK for pyannote)
+                if model_type == 'pyannote':
+                    if not all(label == "SPEAKER_UNK" for label in labels):
+                        has_valid_embeddings = True
+                        all_labels.append((model_id, labels))
+                else:
+                    has_valid_embeddings = True
+                    all_labels.append((model_id, labels))
         
-        # If pyannote has all SPEAKER_UNK, use only SpeechBrain
-        if pyannote_all_unknown and speechbrain_labels and self.use_speechbrain and self.speechbrain_diarizer:
-            print("[Fusion] Bypassing fusion - using SpeechBrain only")
-            
-            # Return speechbrain output in fusion format
-            return {
-                'speaker_embeddings': speechbrain_output.get('speaker_embeddings'),
-                'speaker_labels': speechbrain_output.get('speaker_labels', []),
-                'pyannote_embeddings': None,
-                'speechbrain_embeddings': speechbrain_output.get('speaker_embeddings')
-            }
-        
-        # Determine labels (prefer the system with more speakers or use a consensus)
-        if pyannote_labels and speechbrain_labels:
-            # Use labels from system with more detected speakers
-            if len(pyannote_labels) >= len(speechbrain_labels):
-                current_labels = pyannote_labels
-            else:
-                current_labels = speechbrain_labels
-        elif pyannote_labels:
-            current_labels = pyannote_labels
-        elif speechbrain_labels:
-            current_labels = speechbrain_labels
-        else:
-            # No speakers detected
-            return {
+        if not has_valid_embeddings:
+            # No valid embeddings from any model
+            result = {
                 'speaker_embeddings': None,
-                'speaker_labels': [],
-                'pyannote_embeddings': None,
-                'speechbrain_embeddings': None
+                'speaker_labels': []
             }
+            for model_type, model_id in self.model_instances:
+                result[f'{model_id}_embeddings'] = None
+            return result
         
-        # Prepare embeddings for fusion (align with labels)
-        # For simplicity, we assume both systems detect the same number of speakers
-        # In practice, you might need more sophisticated alignment
+        # Determine labels (use the system with more detected speakers)
+        if len(all_labels) > 0:
+            # Sort by number of speakers (descending)
+            all_labels.sort(key=lambda x: len(x[1]), reverse=True)
+            current_labels = all_labels[0][1]
+        else:
+            result = {
+                'speaker_embeddings': None,
+                'speaker_labels': []
+            }
+            for model_type, model_id in self.model_instances:
+                result[f'{model_id}_embeddings'] = None
+            return result
         
+        # Prepare embeddings for fusion
         num_speakers = len(current_labels)
         
-        # Expand embeddings if needed
-        if pyannote_embeddings is not None and len(pyannote_embeddings) < num_speakers:
-            # Add padding to pyannote embeddings
-            pyannote_embeddings = np.pad(pyannote_embeddings, ((0, num_speakers - len(pyannote_embeddings)), (0, 0)), mode='constant')
-        if speechbrain_embeddings is not None and len(speechbrain_embeddings) < num_speakers:
-            # Add padding to speechbrain embeddings
-            speechbrain_embeddings = np.pad(speechbrain_embeddings, ((0, num_speakers - len(speechbrain_embeddings)), (0, 0)), mode='constant')
+        # Expand embeddings if needed (pad to match num_speakers)
+        for model_type, model_id in self.model_instances:
+            embeddings = extracted.get(f'{model_id}_embeddings')
+            if embeddings is not None and len(embeddings) < num_speakers:
+                # Add padding
+                padding = ((0, num_speakers - len(embeddings)), (0, 0))
+                extracted[f'{model_id}_embeddings'] = np.pad(embeddings, padding, mode='constant')
         
-        output = {
-            'pyannote_embeddings': pyannote_embeddings,
-            'speechbrain_embeddings': speechbrain_embeddings,
-            'speaker_labels': current_labels
-        }
+        output = {'speaker_labels': current_labels}
+        for model_type, model_id in self.model_instances:
+            output[f'{model_id}_embeddings'] = extracted.get(f'{model_id}_embeddings')
         
         if not use_memory:
             # Just return fused embeddings without memory matching
             fused_embeddings = []
             for i in range(num_speakers):
-                pyannote_emb = pyannote_embeddings[i] if pyannote_embeddings is not None else None
-                speechbrain_emb = speechbrain_embeddings[i] if speechbrain_embeddings is not None else None
-                fused_emb = self._fuse_embeddings(pyannote_emb, speechbrain_emb)
+                # Get embeddings from all model instances for this speaker
+                model_embeddings = []
+                for model_type, model_id in self.model_instances:
+                    emb_array = extracted.get(f'{model_id}_embeddings')
+                    if emb_array is not None and i < len(emb_array):
+                        model_embeddings.append(emb_array[i])
+                    else:
+                        model_embeddings.append(None)
+                
+                fused_emb = self._fuse_embeddings(*model_embeddings)
                 fused_embeddings.append(fused_emb)
             
             output['speaker_embeddings'] = np.array(fused_embeddings)
@@ -1030,8 +1129,7 @@ class RealtimeSpeakerDiarization:
         
         # Match with memory
         label_mapping = self._match_speakers_with_memory(
-            pyannote_embeddings,
-            speechbrain_embeddings,
+            extracted,  # Pass the extracted dict
             current_labels,
             max_speakers=max_speakers,
             audio_duration=audio_duration
@@ -1081,7 +1179,8 @@ class RealtimeSpeakerDiarization:
                 'total_chunks': 0,
                 'num_speakers': 0,
                 'fusion_method': self.fusion_method,
-                'fusion_alpha': self.fusion_alpha
+                'fusion_weights': self.fusion_weights,
+                'models': [f"{mt}({mid})" if mt != mid else mt for mt, mid in self.model_instances]
             }
         
         session_data = self._get_session_data(session_id)
@@ -1097,7 +1196,8 @@ class RealtimeSpeakerDiarization:
             'total_chunks': session_data['total_chunks_processed'],
             'num_speakers': len(session_data['speaker_memory']),
             'fusion_method': self.fusion_method,
-            'fusion_alpha': self.fusion_alpha
+            'fusion_weights': self.fusion_weights,
+            'models': [f"{mt}({mid})" if mt != mid else mt for mt, mid in self.model_instances]
         }
     
     def get_all_sessions_info(self) -> Dict[str, Dict]:
@@ -1130,29 +1230,306 @@ class RealtimeSpeakerDiarization:
 
 # ============ EXAMPLE USAGE ============
 if __name__ == "__main__":
-    # Khởi tạo realtime pipeline
-    pipeline = RealtimeSpeakerDiarization(
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    # ========================================================================
+    # EXAMPLE 1: SpeechBrain + Pyannote (2 models)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("EXAMPLE 1: SpeechBrain + Pyannote Fusion")
+    print("=" * 80)
+    
+    pipeline_sb_pyan = RealtimeSpeakerDiarization(
+        models=['speechbrain', 'pyannote'],
         fusion_method="score_level",
-        fusion_alpha=0.4, # trọng số fusion (0-1), final score = fusion_alpha * score_pyannote + (1 - fusion_alpha) * score_speechbrain
-        fusion_weights=[0.5, 0.5], # trọng số cho learned_concat, fusion_embedding = w1 * pyannote_embedding + w2 * speechbrain_embedding
-        similarity_threshold=0.7,  # threshold để match speaker (càng cao càng strict)
-        embedding_update_weight=0.3,  # trọng số update embedding (0.3 = 30% mới, 70% cũ)
-        min_similarity_gap=0.3,  # gap tối thiểu để match nếu nổi bật hơn hẳn
-        skip_update_short_audio=True,  # bật tính năng skip update cho audio ngắn
-        min_duration_for_update=2.0,  # chỉ update embedding nếu audio >= 2s
-        init_similarity_threshold=0.4  # threshold thấp hơn cho chunk thứ 2 sau init
+        fusion_weights=[0.4, 0.6],  # 40% SpeechBrain, 60% Pyannote
+        model_configs={
+            'pyannote': {
+                'model_name': "pyannote/speaker-diarization-community-1",
+                'token': os.getenv("HF_TOKEN")
+            }
+        },
+        similarity_threshold=0.7,
+        embedding_update_weight=0.3,
+        min_similarity_gap=0.3,
+        skip_update_short_audio=True,
+        min_duration_for_update=2.0,
+        init_similarity_threshold=0.4
+    )
+    
+    session_1 = "sb_pyan_conversation"
+    pipeline_sb_pyan.set_session(session_1)
+    
+    output1 = pipeline_sb_pyan(
+        "/home/hoang/speaker_diarization/wav/A1.wav",
+        num_speakers=2,
+        use_memory=True,
+        session_id=session_1
+    )
+    
+    print(f"\n📊 Results: {output1['speaker_labels']}")
+    print(f"💾 Speaker Memory: {pipeline_sb_pyan.get_speaker_info(session_1)}")
+    
+    # ========================================================================
+    # EXAMPLE 2: SpeechBrain + NeMo (2 models)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("EXAMPLE 2: SpeechBrain + NeMo Fusion")
+    print("=" * 80)
+    
+    pipeline_sb_nemo = RealtimeSpeakerDiarization(
+        models=['speechbrain', 'nemo'],
+        fusion_method="weighted_average",
+        fusion_weights=[0.5, 0.5],  # Equal weights
+        model_configs={
+            'nemo': {
+                'pretrained_speaker_model': "titanet_large"
+            }
+        },
+        similarity_threshold=0.7,
+        embedding_update_weight=0.3,
+        min_similarity_gap=0.3,
+        skip_update_short_audio=True,
+        min_duration_for_update=2.0,
+        init_similarity_threshold=0.4
+    )
+    
+    session_2 = "sb_nemo_conversation"
+    pipeline_sb_nemo.set_session(session_2)
+    
+    output2 = pipeline_sb_nemo(
+        "/home/hoang/speaker_diarization/wav/A2.wav",
+        num_speakers=2,
+        use_memory=True,
+        session_id=session_2
+    )
+    
+    print(f"\n📊 Results: {output2['speaker_labels']}")
+    print(f"💾 Speaker Memory: {pipeline_sb_nemo.get_speaker_info(session_2)}")
+    
+    # ========================================================================
+    # EXAMPLE 3: Pyannote + NeMo (2 models)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("EXAMPLE 3: Pyannote + NeMo Fusion")
+    print("=" * 80)
+    
+    pipeline_pyan_nemo = RealtimeSpeakerDiarization(
+        models=['pyannote', 'nemo'],
+        fusion_method="normalized_average",
+        model_configs={
+            'pyannote': {
+                'model_name': "pyannote/speaker-diarization-community-1",
+                'token': os.getenv("HF_TOKEN")
+            },
+            'nemo': {
+                'pretrained_speaker_model': "titanet_large"
+            }
+        },
+        similarity_threshold=0.7,
+        embedding_update_weight=0.3,
+        min_similarity_gap=0.3,
+        skip_update_short_audio=True,
+        min_duration_for_update=2.0,
+        init_similarity_threshold=0.4
+    )
+    
+    session_3 = "pyan_nemo_conversation"
+    pipeline_pyan_nemo.set_session(session_3)
+    
+    output3 = pipeline_pyan_nemo(
+        "/home/hoang/speaker_diarization/wav/B1.wav",
+        num_speakers=2,
+        use_memory=True,
+        session_id=session_3
+    )
+    
+    print(f"\n📊 Results: {output3['speaker_labels']}")
+    print(f"💾 Speaker Memory: {pipeline_pyan_nemo.get_speaker_info(session_3)}")
+    
+    # ========================================================================
+    # EXAMPLE 4: SpeechBrain + Pyannote + NeMo (3 models)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("EXAMPLE 4: SpeechBrain + Pyannote + NeMo Fusion (3 models)")
+    print("=" * 80)
+    
+    pipeline_all = RealtimeSpeakerDiarization(
+        models=['speechbrain', 'pyannote', 'nemo'],
+        fusion_method="score_level",
+        fusion_weights=[0.3, 0.4, 0.3],  # 30% SB, 40% Pyannote, 30% NeMo
+        model_configs={
+            'pyannote': {
+                'model_name': "pyannote/speaker-diarization-community-1",
+                'token': os.getenv("HF_TOKEN")
+            },
+            'nemo': {
+                'pretrained_speaker_model': "titanet_large"
+            }
+        },
+        similarity_threshold=0.7,
+        embedding_update_weight=0.3,
+        min_similarity_gap=0.3,
+        skip_update_short_audio=True,
+        min_duration_for_update=2.0,
+        init_similarity_threshold=0.4
     )
 
+    
+    session_4 = "all_models_conversation"
+    pipeline_all.set_session(session_4)
+    
+    print("\n--- Processing chunk 1 ---")
+    output4_1 = pipeline_all(
+        "/home/hoang/speaker_diarization/wav/A1.wav",
+        num_speakers=2,
+        use_memory=True,
+        session_id=session_4
+    )
+    print(f"📊 Results chunk 1: {output4_1['speaker_labels']}")
+    print(f"💾 Speaker Memory: {pipeline_all.get_speaker_info(session_4)}")
+    
+    print("\n--- Processing chunk 2 ---")
+    output4_2 = pipeline_all(
+        "/home/hoang/speaker_diarization/wav/B1.wav",
+        num_speakers=2,
+        use_memory=True,
+        session_id=session_4
+    )
+    print(f"📊 Results chunk 2: {output4_2['speaker_labels']}")
+    print(f"💾 Speaker Memory: {pipeline_all.get_speaker_info(session_4)}")
+    
+    # ========================================================================
+    # EXAMPLE 5: Different fusion methods with 3 models
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("EXAMPLE 5: Testing different fusion methods")
+    print("=" * 80)
+    
+    fusion_methods = [
+        "concatenate",
+        "normalized_average",
+        "weighted_average",
+        "product",
+        "max_pool",
+        "learned_concat"
+    ]
+    
+    for method in fusion_methods:
+        print(f"\n--- Testing {method} ---")
+        try:
+            pipeline_test = RealtimeSpeakerDiarization(
+                models=['speechbrain', 'pyannote'],
+                fusion_method=method,
+                fusion_weights=[0.5, 0.5],
+                model_configs={
+                    'pyannote': {
+                        'model_name': "pyannote/speaker-diarization-community-1",
+                        'token': os.getenv("HF_TOKEN")
+                    }
+                },
+                similarity_threshold=0.7
+            )
+            
+            pipeline_test.set_session(f"test_{method}")
+            output_test = pipeline_test(
+                "/home/hoang/speaker_diarization/wav/A1.wav",
+                num_speakers=2,
+                use_memory=True,
+                session_id=f"test_{method}"
+            )
+            print(f"✅ {method}: {output_test['speaker_labels']}")
+        except Exception as e:
+            print(f"❌ {method} failed: {e}")
+    
+    # ========================================================================
+    # EXAMPLE 6: Multiple instances of same model type with different configs
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("EXAMPLE 6: Multiple Pyannote models with different configs")
+    print("=" * 80)
+    
+    try:
+        pipeline_multi_pyan = RealtimeSpeakerDiarization(
+            models=[
+                ('nemo', 'nemo_tianet'),
+                ('nemo', 'nemo_ecapa_tdnn'),
+                ('pyannote', 'pyan_community'),
+                ('speechbrain', 'sb_default')
+            ],
+            fusion_method="score_level",
+            fusion_weights=[0.3, 0.4, 0.3],  # 30% v3, 40% community, 30% SB
+            model_configs={
+                'nemo_tianet': {'pretrained_speaker_model': 'titanet_large'},
+                'nemo_ecapa_tdnn': {'pretrained_speaker_model': 'ecapa_tdnn'},
+                'pyan_community': {
+                    'model_name': "pyannote/speaker-diarization-community-1",
+                    'token': os.getenv("HF_TOKEN")
+                },
+                'sb_default': {}
+            },
+            similarity_threshold=0.7,
+            embedding_update_weight=0.3,
+            min_similarity_gap=0.3
+        )
+        
+        session_multi = "multi_pyannote_session"
+        pipeline_multi_pyan.set_session(session_multi)
+        
+        output_multi = pipeline_multi_pyan(
+            "/home/hoang/speaker_diarization/wav/A1.wav",
+            num_speakers=2,
+            use_memory=True,
+            session_id=session_multi
+        )
+        
+        print(f"\n📊 Results: {output_multi['speaker_labels']}")
+        print(f"💾 Speaker Memory: {pipeline_multi_pyan.get_speaker_info(session_multi)}")
+    except Exception as e:
+        print(f"❌ Example 6 failed: {e}")
+    
+    print("\n" + "=" * 80)
+    print("All examples completed!")
+    print("=" * 80)
+    
+    
+    # ========================================================================
+    # LEGACY EXAMPLES (kept for compatibility)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("LEGACY EXAMPLES")
+    print("=" * 80)
+    
     # Ví dụ 1: Xử lý audio chunk đầu tiên với Session ID
     print("=" * 100)
     print("VÍ DỤ 1: Xử lý audio chunk đầu tiên với Session ID")
     print("=" * 100)
     
+    pipeline_legacy = RealtimeSpeakerDiarization(
+        models=['speechbrain', 'pyannote'],
+        fusion_method="score_level",
+        fusion_weights=[0.4, 0.6],
+        model_configs={
+            'pyannote': {
+                'model_name': "pyannote/speaker-diarization-community-1",
+                'token': os.getenv("HF_TOKEN")
+            }
+        },
+        similarity_threshold=0.7,
+        embedding_update_weight=0.3,
+        min_similarity_gap=0.3,
+        skip_update_short_audio=True,
+        min_duration_for_update=2.0,
+        init_similarity_threshold=0.4
+    )
+    
     # Set session for this conversation
     session_1 = "conversation_1"
-    pipeline.set_session(session_1)
+    pipeline_legacy.set_session(session_1)
 
-    output1 = pipeline(
+    output1 = pipeline_legacy(
         "/home/hoang/speaker_diarization/wav/A1.wav",
         num_speakers=2,
         use_memory=True,
@@ -1162,8 +1539,8 @@ if __name__ == "__main__":
     print("\n📊 Kết quả chunk 1:")
     print(f"  🎤 {output1['speaker_labels']}")
 
-    print(f"\n💾 Speaker Memory (Session {session_1}): {pipeline.get_speaker_info(session_1)}")
-    print(f"\n📋 All Sessions: {pipeline.list_sessions()}")
+    print(f"\n💾 Speaker Memory (Session {session_1}): {pipeline_legacy.get_speaker_info(session_1)}")
+    print(f"\n📋 All Sessions: {pipeline_legacy.list_sessions()}")
 
     # Ví dụ 2: Xử lý một conversation khác với session_id khác
     print("\n" + "=" * 100)
@@ -1171,9 +1548,9 @@ if __name__ == "__main__":
     print("=" * 100)
     
     session_2 = "conversation_2"
-    pipeline.set_session(session_2)
+    pipeline_legacy.set_session(session_2)
 
-    output2 = pipeline(
+    output2 = pipeline_legacy(
         "/home/hoang/speaker_diarization/wav/A2.wav",
         num_speakers=2,
         use_memory=True,
@@ -1183,18 +1560,18 @@ if __name__ == "__main__":
     print("\n📊 Kết quả chunk 1 (Session 2):")
     print(f"  🎤 {output2['speaker_labels']}")
 
-    print(f"\n💾 Speaker Memory (Session {session_2}): {pipeline.get_speaker_info(session_2)}")
-    print(f"💾 Speaker Memory (Session {session_1}): {pipeline.get_speaker_info(session_1)}")
-    print(f"\n📋 All Sessions: {pipeline.list_sessions()}")
+    print(f"\n💾 Speaker Memory (Session {session_2}): {pipeline_legacy.get_speaker_info(session_2)}")
+    print(f"💾 Speaker Memory (Session {session_1}): {pipeline_legacy.get_speaker_info(session_1)}")
+    print(f"\n📋 All Sessions: {pipeline_legacy.list_sessions()}")
 
     # Ví dụ 3: Quay lại session 1 và xử lý chunk tiếp theo
     print("\n" + "=" * 100)
     print("VÍ DỤ 3: Quay lại Session 1 và xử lý chunk tiếp theo")
     print("=" * 100)
     
-    pipeline.set_session(session_1)  # Chuyển về session 1
+    pipeline_legacy.set_session(session_1)  # Chuyển về session 1
 
-    output3 = pipeline(
+    output3 = pipeline_legacy(
         "/home/hoang/speaker_diarization/wav/B1.wav",
         num_speakers=2,
         use_memory=True,
@@ -1204,7 +1581,7 @@ if __name__ == "__main__":
     print("\n📊 Kết quả chunk 2 (Session 1 continued):")
     print(f"  🎤 {output3['speaker_labels']}")
 
-    print(f"\n💾 Speaker Memory (Session 1 updated): {pipeline.get_speaker_info(session_1)}")
+    print(f"\n💾 Speaker Memory (Session 1 updated): {pipeline_legacy.get_speaker_info(session_1)}")
     
     # Ví dụ 4: Demo session management operations
     print("\n" + "=" * 100)
@@ -1212,18 +1589,18 @@ if __name__ == "__main__":
     print("=" * 100)
     
     # Liệt kê tất cả sessions
-    print(f"\n📋 Current sessions: {pipeline.list_sessions()}")
-    print(f"📍 Current session ID: {pipeline.get_current_session_id()}")
+    print(f"\n📋 Current sessions: {pipeline_legacy.list_sessions()}")
+    print(f"📍 Current session ID: {pipeline_legacy.get_current_session_id()}")
     
     # Reset một session (xóa speaker memory nhưng giữ session)
     print(f"\n🔄 Resetting session: {session_1}")
-    pipeline.reset_session(session_1)
-    print(f"💾 Speaker Memory after reset: {pipeline.get_speaker_info(session_1)}")
+    pipeline_legacy.reset_session(session_1)
+    print(f"💾 Speaker Memory after reset: {pipeline_legacy.get_speaker_info(session_1)}")
     
     # Xem thông tin tất cả sessions
     print(f"\n📊 All sessions info:")
-    for session_id, info in pipeline.get_all_sessions_info().items():
+    for session_id, info in pipeline_legacy.get_all_sessions_info().items():
         print(f"  Session '{session_id}': {info['num_speakers']} speakers, {info['total_chunks']} chunks")
 
-    print(f"\n💾 Speaker Memory (updated): {pipeline.get_speaker_info()}")
+    print(f"\n💾 Speaker Memory (updated): {pipeline_legacy.get_speaker_info()}")
     print("=" * 100)

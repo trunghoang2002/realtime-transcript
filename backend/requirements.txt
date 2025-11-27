@@ -7,7 +7,8 @@ onnxruntime-gpu==1.23.2
 requests==2.32.5
 jiwer==4.0.0
 python-multipart==0.0.20
-pyannote.audio==4.0.2
+pyannote.audio==4.0.1
+nemo-toolkit[asr]==2.5.3
 SudachiPy==0.6.10
 sudachidict_core
 regex

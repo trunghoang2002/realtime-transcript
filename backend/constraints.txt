@@ -1,5 +1,0 @@
-# you need the CUDA version is 12.1 to use the whisper with gpu
---index-url https://download.pytorch.org/whl/cu121
-torch==2.5.1
-torchvision==0.20.1
-torchaudio==2.5.1
