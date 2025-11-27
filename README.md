@@ -17,41 +17,58 @@
   - **Full messages**: Transcript chính xác hơn từ toàn bộ đoạn speech khi phát hiện kết thúc (độ chính xác cao)
 - **Smart Buffer Management**: Tự động tích lũy audio và transcribe lại với cấu hình tốt hơn khi phát hiện kết thúc đoạn speech
 - **File Upload**: Upload và transcribe file audio/video (mp3, wav, m4a, mp4, avi, mov, ...), trả về full transcript và danh sách segments có timestamp
+
 - **Speaker Detection (Nhận diện người nói)**: Tùy chọn nhận diện và phân biệt nhiều người nói trong audio
-  - **Whisper-based:**
-    - **main_v3.py** (khuyến nghị ⭐): 2-tier matching (EMA + cluster centroid), persistent memory
+  - **Whisper-based (Mã nguồn mở):**
+    - **main_v6.py** (khuyến nghị ⭐): Fusion diarization (SpeechBrain + NeMo), chính xác cao nhất
+      - 7 fusion methods: score_level, weighted_average, concatenate, product, max_pool, learned_concat, normalized_average
+      - Multiple model instances: Hỗ trợ nhiều instances của cùng model type
+      - Dimension alignment tự động
+      - Session management và NaN handling
+    - **main_v5.py**: NeMo TitaNet Large, 2-tier matching, nhanh và chính xác
+    - **main_v4.py**: Pyannote embeddings, 2-tier matching, chất lượng cao
+    - **main_v3.py**: SpeechBrain ECAPA-TDNN, 2-tier matching, nhanh và ổn định
     - **main_v2.py**: Bootstrap clustering với K-means, tự động phân cụm
     - **main.py**: Chỉ hỗ trợ trong file upload
   - **API-based:** 3-tier matching (EMA → centroid → verification model) cho độ chính xác cao
   - Hỗ trợ cấu hình số lượng người nói tối đa (mặc định: 2)
-  - Speaker ID format: `spk_01`, `spk_02` (Whisper) hoặc `SPEAKER_00`, `SPEAKER_01` (v3)
+  - Speaker ID format: `SPEAKER_00`, `SPEAKER_01`, ... (v3, v4, v5, v6)
+
+- **Advanced Fusion Features**:
+  - Combine 2+ models: SpeechBrain, Pyannote, NeMo
+  - Custom weights cho từng model
+  - Multiple instances của cùng model type (VD: 2 NeMo models với configs khác nhau)
+  - Automatic dimension alignment giữa các models khác nhau
+
 - **Đa ngôn ngữ**: Hỗ trợ nhiều ngôn ngữ với tự động phát hiện ngôn ngữ
 - **Timestamps**: Realtime có timestamp theo buffer; Upload có timestamp từ model hoặc được suy đoán (fallback) theo độ dài nội dung
 - **RTF (Real-Time Factor)**: Tính toán và hiển thị RTF cho file upload để đánh giá hiệu suất xử lý
+- **Session Management**: Theo dõi speakers độc lập qua nhiều conversations
 - **Auto-detect WebSocket URL**: Tự động phát hiện và cấu hình WebSocket URL từ port của backend
 - **Error Handling**: Hệ thống thông báo lỗi/thành công với tự động dừng khi có lỗi
 - **UI Protection**: Tự động disable các tùy chọn cấu hình khi đang xử lý để tránh thay đổi không mong muốn
 - **Drag & Drop**: Kéo thả file để upload dễ dàng
 - **Progress Tracking**: Theo dõi tiến trình upload và xử lý
+- **Evaluation System**: Đánh giá ASR (WER, CER, RTF) và Diarization (EER, FAR, FRR, F1, AUC)
 
 ## 📊 So sánh các Versions
 
 ### Whisper-based Versions (Mã nguồn mở, tối ưu realtime)
 
-| Feature | main.py | main_v2.py | main_v3.py | main_v4.py | main_v5.py ⭐ | main_sensevoice.py |
-|---------|---------|------------|------------|------------|---------------|-------------------|
-| **Model** | Whisper | Whisper | Whisper | Whisper | Whisper | SenseVoice |
-| **Realtime Transcription** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **File Upload** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Speaker Detection (Realtime)** | ❌ | ✅ Bootstrap | ✅ 2-tier | ✅ 2-tier | ✅ Fusion | ❌ |
-| **Speaker Detection (File)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Embedding System** | - | SpeechBrain | SpeechBrain | Pyannote | **Fusion** | - |
-| **Độ phức tạp** | Đơn giản | Phức tạp | Trung bình | Trung bình | Cao | Đơn giản |
-| **Hiệu suất** | Tốt | Tốt | Tốt nhất | Rất tốt | **Tốt nhất** | Tốt |
-| **Bootstrap Phase** | - | ~1 phút | Không cần | Không cần | Không cần | - |
-| **Speaker Tracking** | File only | Persistent | Persistent | Persistent | Persistent | File only |
-| **Chi phí** | Miễn phí | Miễn phí | Miễn phí | Miễn phí | Miễn phí | Miễn phí |
-| **Khuyến nghị** | Testing | Tự động phân cụm | SpeechBrain | Pyannote | **Fusion - Tốt nhất** | Thay thế Whisper |
+| Feature | main.py | main_v2.py | main_v3.py | main_v4.py | main_v5.py | main_v6.py ⭐ | main_sensevoice.py |
+|---------|---------|------------|------------|------------|------------|---------------|-------------------|
+| **Model** | Whisper | Whisper | Whisper | Whisper | Whisper | Whisper | SenseVoice |
+| **Realtime Transcription** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **File Upload** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Speaker Detection (Realtime)** | ❌ | ✅ Bootstrap | ✅ 2-tier | ✅ 2-tier | ✅ 2-tier | ✅ Fusion | ❌ |
+| **Speaker Detection (File)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Embedding System** | - | SpeechBrain | SpeechBrain | Pyannote | NeMo | **Fusion (SB+NeMo)** | - |
+| **Độ phức tạp** | Đơn giản | Phức tạp | Trung bình | Trung bình | Trung bình | Cao | Đơn giản |
+| **Hiệu suất** | Tốt | Tốt | Tốt nhất | Rất tốt | Rất tốt | **Tốt nhất** | Tốt |
+| **Bootstrap Phase** | - | ~1 phút | Không cần | Không cần | Không cần | Không cần | - |
+| **Speaker Tracking** | File only | Persistent | Persistent | Persistent | Persistent | Persistent | File only |
+| **Chi phí** | Miễn phí | Miễn phí | Miễn phí | Miễn phí | Miễn phí | Miễn phí | Miễn phí |
+| **Khuyến nghị** | Testing | Tự động phân cụm | SpeechBrain | Pyannote | NeMo Only | **Fusion - Tốt nhất** | Thay thế Whisper |
 
 ### API-based Versions (Chính xác cao, yêu cầu API key/server)
 
@@ -72,11 +89,12 @@
 
 **Mã nguồn mở (Miễn phí):**
 - 🏁 **Mới bắt đầu**: `main.py` - Đơn giản, dễ hiểu
-- ⭐ **Tốt nhất**: `main_v5.py` - Fusion diarization (Pyannote + SpeechBrain), chính xác cao nhất
+- 🔄 **Thay thế**: `main_sensevoice.py` - Model SenseVoice
+- 🔬 **Nghiên cứu**: `main_v2.py` - Bootstrap clustering, tự động phân cụm
 - 🎯 **SpeechBrain**: `main_v3.py` - SpeechBrain embeddings, nhanh và ổn định
 - 🎨 **Pyannote**: `main_v4.py` - Pyannote embeddings, chất lượng cao
-- 🔬 **Nghiên cứu**: `main_v2.py` - Bootstrap clustering, tự động phân cụm
-- 🔄 **Thay thế**: `main_sensevoice.py` - Model SenseVoice
+- 🚀 **NeMo**: `main_v5.py` - NeMo TitaNet embeddings, hiệu suất tốt
+- ⭐ **Tốt nhất**: `main_v6.py` - Fusion diarization (SpeechBrain + NeMo), chính xác cao nhất
 
 **API-based (Chính xác cao, có phí):**
 - 🌟 **Chính xác nhất**: `main_gemini.py` - Google Gemini, hỗ trợ đa ngôn ngữ tốt nhất
@@ -88,26 +106,28 @@
 
 | Version | Chi phí | Latency | Chính xác | GPU Required | Use Case |
 |---------|---------|---------|-----------|--------------|----------|
-| **main_v5.py** | Miễn phí | Thấp (~150ms) | Rất cao | Optional | **Production miễn phí tốt nhất ⭐** |
-| **main_v3.py** | Miễn phí | Thấp (~100ms) | Tốt | Optional | Production SpeechBrain |
+| **main_v6.py** | Miễn phí | Thấp (~150ms) | Rất cao | Optional | **Production miễn phí tốt nhất ⭐** |
+| **main_v5.py** | Miễn phí | Thấp (~110ms) | Cao | Optional | Production NeMo |
 | **main_v4.py** | Miễn phí | Thấp (~120ms) | Cao | Optional | Production Pyannote |
+| **main_v3.py** | Miễn phí | Thấp (~100ms) | Tốt | Optional | Production SpeechBrain |
 | **main_gemini.py** | ~$0.01/min | Cao (~1-2s) | Rất cao | No | Chất lượng cao nhất (API) ⭐ |
 | **main_qwenaudio.py** | ~$0.5-1/hour | Trung bình (~500ms) | Cao | Modal GPU | Self-hosted |
 | **main_whispersmall_qwenomni.py** | ~$0.005/min | Thấp+Cao | Rất cao | Optional | Hybrid tối ưu ⭐ |
 
 **Lưu ý về chi phí:**
 - Whisper versions: Hoàn toàn miễn phí, chạy local
-- **main_v5.py**: Miễn phí, kết hợp tốt nhất của Pyannote và SpeechBrain
+- **main_v6.py**: Miễn phí, fusion SpeechBrain + NeMo với score-level fusion
+- **main_v5.py**: Miễn phí, chỉ dùng NeMo TitaNet, nhanh và chính xác
 - Gemini: Free tier 15 requests/phút, sau đó có phí
 - Qwen Audio Modal: Tính theo GPU hours (~$0.5-1/hour trên L4/H100)
 - Hybrid: Chi phí thấp hơn vì chỉ call API cho full transcription
 
 **Performance Tips:**
-- **Tốt nhất (Miễn phí)**: Dùng `main_v5.py` - Fusion diarization với score-level fusion
-- **Độ trễ thấp**: Dùng `main_v3.py` - SpeechBrain nhanh nhất
-- **Chính xác cao (Miễn phí)**: Dùng `main_v4.py` hoặc `main_v5.py`
+- **Tốt nhất (Miễn phí)**: Dùng `main_v6.py` - Fusion diarization (SpeechBrain + NeMo)
+- **Độ trễ thấp**: Dùng `main_v3.py` hoặc `main_v5.py` - Nhanh nhất
+- **Chính xác cao (Miễn phí)**: Dùng `main_v3.py`, `main_v5.py`, hoặc `main_v6.py`
 - **Chính xác cao (API)**: Dùng Gemini hoặc Hybrid versions
-- **Data privacy**: Dùng Whisper local versions (v3, v4, v5)
+- **Data privacy**: Dùng Whisper local versions (v3, v4, v5, v6)
 
 ## 🏗️ Kiến trúc
 
@@ -118,11 +138,13 @@
   - **API-based**: Google Gemini, Qwen Audio (Modal/vLLM), Qwen Omni
   - **Hybrid**: Whisper (realtime) + API (full transcription)
 - **Speaker Diarization**: 
-  - **Fusion**: Kết hợp Pyannote + SpeechBrain với nhiều fusion methods (main_v5.py ⭐)
-  - **SpeechBrain**: ECAPA-TDNN với 2-tier matching (EMA + cluster centroid) (main_v3.py)
+  - **Fusion**: Kết hợp SpeechBrain + NeMo với nhiều fusion methods (main_v6.py ⭐)
+  - **NeMo**: TitaNet Large với 2-tier matching (EMA + cluster centroid) (main_v5.py)
   - **Pyannote**: pyannote.audio với 2-tier matching (main_v4.py)
+  - **SpeechBrain**: ECAPA-TDNN với 2-tier matching (EMA + cluster centroid) (main_v3.py)
   - Bootstrap clustering với K-means (main_v2.py)
   - 3-tier matching với verification model (API versions)
+  - **Multiple Model Instances**: Hỗ trợ nhiều instances của cùng model type với configs khác nhau
 - **Infrastructure**:
   - Local: CUDA 12.1 + cuDNN 9 cho GPU inference
   - Cloud: Modal platform cho Qwen Audio deployment
@@ -131,7 +153,7 @@
 ## 📋 Yêu cầu hệ thống
 
 ### Phần mềm
-- Python 3.8+
+- Python 3.10+
 - ffmpeg (để xử lý video files)
 
 ### Phần cứng
@@ -178,7 +200,6 @@ venv\Scripts\activate  # Windows
 ### 3. Cài đặt dependencies
 ```bash
 cd backend
-pip install -r constraints.txt
 pip install -r requirements.txt
 ```
 
@@ -189,16 +210,13 @@ pip install -r requirements.txt
   - `backend/scripts/run_main_v2_with_cuda.sh` - Whisper với bootstrap speaker detection (main_v2.py)
   - `backend/scripts/run_main_v3_with_cuda.sh` - Whisper với SpeechBrain diarization (main_v3.py)
   - `backend/scripts/run_main_v4_with_cuda.sh` - Whisper với Pyannote diarization (main_v4.py)
-  - `backend/scripts/run_main_v5_with_cuda.sh` - Whisper với Fusion diarization (main_v5.py, khuyến nghị ⭐)
+  - `backend/scripts/run_main_v5_with_cuda.sh` - Whisper với NeMo diarization (main_v5.py)
+  - `backend/scripts/run_main_v6_with_cuda.sh` - Whisper với Fusion diarization (main_v6.py, khuyến nghị ⭐)
   - `backend/scripts/run_main_sensevoice_with_cuda.sh` - SenseVoice
 
 ### 4. Cấu hình model (tùy chọn)
 
 Chỉnh sửa file tương ứng để thay đổi model và device:
-- `backend/main.py` - Whisper version cơ bản
-- `backend/main_v2.py` - Whisper với bootstrap speaker detection
-- `backend/main_v3.py` - Whisper với RealtimeSpeakerDiarization (khuyến nghị)
-- `backend/main_sensevoice.py` - SenseVoice
 
 ```python
 MODEL_NAME = "small"   # "small" (nhanh), "medium" (chính xác), "large-v3" (nặng)
@@ -212,12 +230,8 @@ COMPUTE_TYPE = "int8"  # "float16" trên GPU, "int8" hoặc "int8_float16" trên
 - SenseVoice + GPU: `DEVICE = "cuda"`
 - SenseVoice + CPU: `DEVICE = "cpu"`
 
-**Chọn version:**
-- `main.py`: Version cơ bản, không có speaker detection trong realtime
-- `main_v2.py`: Version với bootstrap clustering speaker detection
-- `main_v3.py`: Version với RealtimeSpeakerDiarization class (khuyến nghị - đơn giản và hiệu quả)
 
-### 5. Cấu hình Pyannote (cho main_v4.py và main_v5.py)
+### 5. Cấu hình Pyannote
 
 **Yêu cầu HuggingFace Token:**
 ```bash
@@ -226,12 +240,10 @@ echo "HF_TOKEN=your_huggingface_token_here" > backend/.env
 ```
 - Lấy token từ: https://huggingface.co/settings/tokens
 - Accept điều khoản của model: https://huggingface.co/pyannote/speaker-diarization-community-1
-- File sử dụng: `main_v4.py`, `main_v5.py`
 
 **Lưu ý:**
 - Pyannote model yêu cầu accept user agreement trước
 - Token cần có quyền read
-- main_v5.py có thể chạy với chỉ SpeechBrain nếu không có token (set `use_pyannote=False`)
 
 ### 6. Cấu hình API-based versions (tùy chọn)
 
@@ -241,7 +253,6 @@ echo "HF_TOKEN=your_huggingface_token_here" > backend/.env
 echo "GEMINI_API_KEY=your_api_key_here" > backend/.env
 ```
 - Lấy API key từ: https://aistudio.google.com/apikey
-- File sử dụng: `main_gemini.py`, `main_v2_gemini.py`
 
 **Qwen Audio (Modal):**
 ```bash
@@ -261,7 +272,6 @@ API_URL = "https://your-modal-url/v1/chat/completions"
 API_URL = "https://your-qwen-endpoint/v1/chat/completions"
 ```
 - Yêu cầu: Custom API endpoint hoặc ngrok tunnel
-- File sử dụng: `main_qwenomni.py`, `main_whispersmall_qwenomni.py`
 
 **Lưu ý:**
 - API-based versions có chi phí sử dụng
@@ -276,9 +286,7 @@ API_URL = "https://your-qwen-endpoint/v1/chat/completions"
 cd backend
 python main.py          # Version cơ bản
 # hoặc
-python main_v2.py       # Version với bootstrap speaker detection
-# hoặc
-python main_v3.py       # Version với RealtimeSpeakerDiarization (khuyến nghị)
+python main_v<i>.py       # Version khác
 ```
 
 Server sẽ chạy tại: `http://localhost:8917`
@@ -299,7 +307,8 @@ cd backend/scripts
 ./run_main_v2_with_cuda.sh       # main_v2.py - Bootstrap speaker detection (port 8917)
 ./run_main_v3_with_cuda.sh       # main_v3.py - SpeechBrain diarization (port 8917)
 ./run_main_v4_with_cuda.sh       # main_v4.py - Pyannote diarization (port 8917)
-./run_main_v5_with_cuda.sh       # main_v5.py - Fusion diarization (port 8917, khuyến nghị ⭐)
+./run_main_v5_with_cuda.sh       # main_v5.py - NeMo diarization (port 8917)
+./run_main_v6_with_cuda.sh       # main_v6.py - Fusion diarization SB+NeMo (port 8917, khuyến nghị ⭐)
 ./run_main_sensevoice_with_cuda.sh  # SenseVoice (port 8918)
 ```
 
@@ -335,8 +344,8 @@ cd backend/scripts
   - SenseVoice: port **8918**
   - Tất cả API-based versions: port **8917**
 - **Khuyến nghị:**
-  - **Miễn phí tốt nhất**: `main_v5.py` - Fusion diarization (Pyannote + SpeechBrain) ⭐
-  - **Miễn phí nhanh**: `main_v3.py` - SpeechBrain diarization
+  - **Miễn phí tốt nhất**: `main_v6.py` - Fusion diarization (SpeechBrain + NeMo) ⭐
+  - **Miễn phí nhanh**: `main_v3.py` hoặc `main_v5.py` - SpeechBrain/NeMo
   - **Chính xác cao (API)**: `main_gemini.py` - Google Gemini API ⭐
   - **Hybrid**: `main_whispersmall_qwenomni.py` - Cân bằng tốc độ & chính xác ⭐
 - **API-based versions yêu cầu:**
@@ -461,7 +470,8 @@ realtime-transcript/
 │   ├── main_v2.py                       # FastAPI server với Whisper + bootstrap speaker detection
 │   ├── main_v3.py                       # FastAPI server với Whisper + SpeechBrain diarization
 │   ├── main_v4.py                       # FastAPI server với Whisper + Pyannote diarization
-│   ├── main_v5.py                       # FastAPI server với Whisper + Fusion diarization (khuyến nghị ⭐)
+│   ├── main_v5.py                       # FastAPI server với Whisper + NeMo diarization
+│   ├── main_v6.py                       # FastAPI server với Whisper + Fusion (SB+NeMo) diarization (khuyến nghị ⭐)
 │   ├── main_sensevoice.py               # FastAPI server với SenseVoice model
 │   ├── main_gemini.py                   # FastAPI server với Gemini model
 │   ├── main_qwenaudio.py                # FastAPI server với Qwen Audio
@@ -477,7 +487,8 @@ realtime-transcript/
 │   │   ├── run_main_v2_with_cuda.sh     # Chạy main_v2.py với CUDA
 │   │   ├── run_main_v3_with_cuda.sh     # Chạy main_v3.py với CUDA
 │   │   ├── run_main_v4_with_cuda.sh     # Chạy main_v4.py với CUDA
-│   │   ├── run_main_v5_with_cuda.sh     # Chạy main_v5.py với CUDA (khuyến nghị ⭐)
+│   │   ├── run_main_v5_with_cuda.sh     # Chạy main_v5.py với CUDA
+│   │   ├── run_main_v6_with_cuda.sh     # Chạy main_v6.py với CUDA (khuyến nghị ⭐)
 │   │   ├── run_main_sensevoice_with_cuda.sh  # Chạy SenseVoice với CUDA
 │   │   ├── run_main_gemini_with_cuda.sh      # Chạy Gemini với CUDA
 │   │   └── ...                          # Các scripts khác
@@ -492,7 +503,10 @@ realtime-transcript/
 │   ├── fix_speechbrain.py               # Patch compatibility cho SpeechBrain với huggingface_hub
 │   ├── speechbrain_diarization.py       # RealtimeSpeakerDiarization class với SpeechBrain ECAPA-TDNN
 │   ├── pyanote_diarization.py           # RealtimeSpeakerDiarization class với Pyannote embeddings
-│   ├── fusion_diarization.py            # Fusion diarization (Pyannote + SpeechBrain) với nhiều fusion methods
+│   ├── nemo_diarization.py              # RealtimeSpeakerDiarization class với NeMo TitaNet/ECAPA-TDNN
+│   ├── fusion_diarization.py            # Fusion diarization (multiple models) với nhiều fusion methods
+│   ├── FUSION_DIARIZATION_README.md     # Tài liệu chi tiết về Fusion Diarization
+│   ├── FUSION_MULTIPLE_MODELS.md        # Hướng dẫn sử dụng multiple model instances
 │   ├── qwen_audio_modal.py              # Qwen Audio model integration
 │   │
 │   ├── check_cuda.py                    # Script kiểm tra CUDA availability
@@ -538,12 +552,19 @@ realtime-transcript/
   - Chất lượng embeddings cao, độ chính xác tốt
   - Session management cho multiple conversations
 
-- **`main_v5.py`**: Server với Fusion diarization (KHUYẾN NGHỊ ⭐)
-  - Realtime: Dual-buffer strategy + Fusion (Pyannote + SpeechBrain)
+- **`main_v5.py`**: Server với NeMo diarization
+  - Realtime: Dual-buffer strategy + NeMo TitaNet Large
+  - Speaker detection: 2-tier matching (EMA embedding + cluster centroid)
+  - Chất lượng embeddings cao, nhanh và ổn định
+  - Session management cho multiple conversations
+
+- **`main_v6.py`**: Server với Fusion diarization (KHUYẾN NGHỊ ⭐)
+  - Realtime: Dual-buffer strategy + Fusion (SpeechBrain + NeMo)
   - Speaker detection: Fusion embeddings với nhiều strategies
   - Fusion methods: score_level, concatenate, weighted_average, v.v.
   - Kết hợp ưu điểm của cả hai hệ thống, chính xác cao nhất
   - Session management và dimension alignment tự động
+  - Hỗ trợ multiple model instances với configs khác nhau
 
 - **`main_sensevoice.py`**: Server sử dụng SenseVoice model (`funasr`)
   - Realtime: Tương tự Whisper với dual-buffer strategy
@@ -600,19 +621,28 @@ realtime-transcript/
   - Tích hợp với pyannote/speaker-diarization-community-1
   - Requires HuggingFace token
 
+- **`nemo_diarization.py`**: RealtimeSpeakerDiarization với NeMo
+  - NeMo TitaNet Large hoặc ECAPA-TDNN embeddings
+  - 2-tier matching: EMA embedding (fast) + cluster centroid (robust)
+  - Persistent speaker memory với exponential moving average
+  - Max speakers constraint với force-assignment
+  - Session management cho multiple conversations
+  - Hiệu suất cao, embeddings chất lượng
+
 - **`fusion_diarization.py`**: Fusion Speaker Diarization (⭐ TỐT NHẤT)
-  - Kết hợp Pyannote + SpeechBrain embeddings
+  - Kết hợp 2+ models: SpeechBrain, Pyannote, NeMo
   - **Fusion methods**:
     - `score_level`: Tính similarity riêng rồi kết hợp (khuyến nghị)
-    - `concatenate`: [E1 ; E2]
-    - `normalized_average`: (norm(E1) + norm(E2)) / 2
-    - `weighted_average`: α*E1 + (1-α)*E2
-    - `product`: norm(E1) ⊙ norm(E2)
-    - `max_pool`: max(E1, E2)
-    - `learned_concat`: [w1*E1 ; w2*E2]
+    - `concatenate`: [E1 ; E2 ; ...]
+    - `normalized_average`: (norm(E1) + norm(E2) + ...) / n
+    - `weighted_average`: α*E1 + β*E2 + ...
+    - `product`: norm(E1) ⊙ norm(E2) ⊙ ...
+    - `max_pool`: max(E1, E2, ...)
+    - `learned_concat`: [w1*E1 ; w2*E2 ; ...]
+  - **Multiple model instances**: Hỗ trợ nhiều instances của cùng model type
   - Dimension alignment tự động (min/max/pad_zero)
   - Session management và NaN handling
-  - Chính xác cao nhất, tận dụng cả hai hệ thống
+  - Chính xác cao nhất, tận dụng ưu điểm của tất cả models
 
 #### Utility Modules
 - **`get_audio.py`**: Xử lý decode audio/video files thành numpy array (16kHz mono) sử dụng `av` (PyAV)
@@ -632,7 +662,8 @@ realtime-transcript/
 - **`run_main_v2_with_cuda.sh`**: Script chạy main_v2.py (bootstrap speaker detection)
 - **`run_main_v3_with_cuda.sh`**: Script chạy main_v3.py (SpeechBrain diarization)
 - **`run_main_v4_with_cuda.sh`**: Script chạy main_v4.py (Pyannote diarization)
-- **`run_main_v5_with_cuda.sh`**: Script chạy main_v5.py (Fusion diarization, khuyến nghị ⭐)
+- **`run_main_v5_with_cuda.sh`**: Script chạy main_v5.py (NeMo diarization)
+- **`run_main_v6_with_cuda.sh`**: Script chạy main_v6.py (Fusion SB+NeMo diarization, khuyến nghị ⭐)
 - **`run_main_sensevoice_with_cuda.sh`**: Script chạy SenseVoice server trên port 8918
 
 **API-based:**
@@ -659,8 +690,13 @@ realtime-transcript/
 - **`whisper_vs_sensevoice.md`**: So sánh ưu/nhược điểm giữa 2 models
 
 #### Evaluation (trong `eval/`)
-- **`eval/`**: Thư mục chứa scripts và test cases để đánh giá chất lượng transcription
-  - `eval.py`: Script chạy evaluation
+- **`eval/`**: Thư mục chứa scripts và test cases để đánh giá chất lượng
+  - **`eval_asr.py`**: Đánh giá ASR models (WER, CER, RTF)
+  - **`eval_diarization.py`**: Đánh giá speaker verification (EER, FAR, FRR, F1, AUC)
+  - **`eval_docs.md`**: Tài liệu chi tiết về evaluation system
+  - Hỗ trợ caching để tối ưu tốc độ
+  - Visualization với ROC, DET, Precision-Recall curves
+  - So sánh multiple models/instances
   - `en/`, `ja/`: Test cases cho các ngôn ngữ khác nhau
 
 ## 🎯 Cách sử dụng
@@ -705,52 +741,52 @@ realtime-transcript/
    - **Segments**: Danh sách các đoạn có timestamp và speaker ID (nếu có)
    - **RTF**: Real-Time Factor (hiệu suất xử lý) - RTF < 1.0 nghĩa là xử lý nhanh hơn thời gian thực
 
-## 🔀 Fusion Methods (main_v5.py)
+## 🔀 Fusion Methods (main_v6.py)
 
-Fusion diarization kết hợp embeddings từ Pyannote và SpeechBrain để đạt độ chính xác cao hơn. Hỗ trợ nhiều fusion strategies:
+Fusion diarization kết hợp embeddings từ nhiều models (SpeechBrain, NeMo, Pyannote) để đạt độ chính xác cao hơn. Hỗ trợ nhiều fusion strategies và multiple model instances:
 
 ### Fusion Methods
 
 **1. Score-level Fusion (Khuyến nghị ⭐)**
 ```python
 fusion_method="score_level"
-fusion_alpha=0.4  # Weight: 0.4*Pyannote + 0.6*SpeechBrain
+fusion_weights=[0.4, 0.6]  # Weights cho từng model (phải tổng = 1.0)
 ```
-- Tính similarity riêng cho mỗi hệ thống, sau đó kết hợp scores
-- Formula: `final_score = α*score_pyannote + (1-α)*score_speechbrain`
-- Ưu điểm: Linh hoạt, tận dụng thế mạnh của từng hệ thống
-- Use case: Khi muốn điều chỉnh trọng số giữa hai hệ thống
+- Tính similarity riêng cho mỗi model, sau đó kết hợp scores
+- Formula: `final_score = α*score_1 + β*score_2 + ...` (với α + β + ... = 1)
+- Ưu điểm: Linh hoạt, tận dụng thế mạnh của từng model
+- Use case: Khi muốn điều chỉnh trọng số giữa các models
 
 **2. Normalized Average**
 ```python
 fusion_method="normalized_average"
 ```
-- Average của normalized embeddings: `E = (norm(E1) + norm(E2)) / 2`
-- Ưu điểm: Đơn giản, cân bằng giữa hai hệ thống
-- Use case: Khi hai hệ thống có độ chính xác tương đương
+- Average của normalized embeddings: `E = (norm(E1) + norm(E2) + ...) / n`
+- Ưu điểm: Đơn giản, cân bằng giữa các models
+- Use case: Khi các models có độ chính xác tương đương
 
 **3. Weighted Average**
 ```python
 fusion_method="weighted_average"
-fusion_alpha=0.5  # Weight for Pyannote
+fusion_weights=[0.5, 0.5]  # Weights cho từng model (phải tổng = 1.0)
 ```
-- Weighted average: `E = α*norm(E1) + (1-α)*norm(E2)`
+- Weighted average: `E = α*norm(E1) + β*norm(E2) + ...` (với α + β + ... = 1)
 - Ưu điểm: Điều chỉnh được trọng số
-- Use case: Khi muốn ưu tiên một hệ thống hơn
+- Use case: Khi muốn ưu tiên một model hơn
 
 **4. Concatenate**
 ```python
 fusion_method="concatenate"
 ```
-- Simple concatenation: `E = [E1 ; E2]`
-- Ưu điểm: Giữ nguyên thông tin từ cả hai
-- Use case: Khi cần tất cả features từ cả hai hệ thống
+- Simple concatenation: `E = [E1 ; E2 ; ...]`
+- Ưu điểm: Giữ nguyên thông tin từ tất cả models
+- Use case: Khi cần tất cả features từ các models
 
 **5. Product**
 ```python
 fusion_method="product"
 ```
-- Element-wise product: `E = norm(E1) ⊙ norm(E2)`
+- Element-wise product: `E = norm(E1) ⊙ norm(E2) ⊙ ...`
 - Ưu điểm: Nhấn mạnh features chung
 - Use case: Khi muốn lọc noise
 
@@ -758,47 +794,194 @@ fusion_method="product"
 ```python
 fusion_method="max_pool"
 ```
-- Max pooling: `E = max(norm(E1), norm(E2))`
+- Max pooling: `E = max(norm(E1), norm(E2), ...)`
 - Ưu điểm: Chọn features mạnh nhất
 - Use case: Khi muốn robust với outliers
 
 **7. Learned Concat**
 ```python
 fusion_method="learned_concat"
-fusion_weights=(1.2, 0.8)  # Custom weights
+fusion_weights=[1.2, 0.8, 1.0]  # Custom weights (có thể > 1.0)
 ```
-- Weighted concatenation: `E = [w1*E1 ; w2*E2]`
+- Weighted concatenation: `E = [w1*E1 ; w2*E2 ; ...]`
 - Ưu điểm: Tùy chỉnh weights cho từng embedding
 - Use case: Sau khi đã học weights tối ưu
 
 ### Dimension Alignment
 
-Pyannote (256-dim) và SpeechBrain (192-dim) có dimensions khác nhau. Fusion diarization tự động xử lý:
+Các models có embedding dimensions khác nhau (VD: Pyannote 256-dim, SpeechBrain 192-dim, NeMo 192-dim). Fusion diarization tự động xử lý:
 
 ```python
-dimension_alignment="min"     # Truncate to 192-dim (mặc định, nhanh)
-dimension_alignment="max"     # Pad zeros to 256-dim (giữ tất cả info)
+dimension_alignment="min"     # Truncate to min dim (nhanh, mất ít info)
+dimension_alignment="max"     # Pad zeros to max dim (giữ tất cả info, mặc định)
 dimension_alignment="pad_zero"  # Tương tự max
 ```
 
-### Configuration Example
+### Multiple Model Instances
+
+Hỗ trợ nhiều instances của cùng model type với configs khác nhau:
 
 ```python
 diarization_model = RealtimeSpeakerDiarization(
-    fusion_method="score_level",      # Fusion strategy
-    fusion_alpha=0.4,                  # Weight (0.4 Pyannote, 0.6 SpeechBrain)
+    models=[
+        ('nemo', 'nemo_titanet'),      # NeMo TitaNet
+        ('nemo', 'nemo_ecapa'),        # NeMo ECAPA-TDNN
+        ('speechbrain', 'sb_default')   # SpeechBrain
+    ],
+    fusion_method="score_level",
+    fusion_weights=[0.4, 0.3, 0.3],   # Weights cho từng instance
+    model_configs={
+        'nemo_titanet': {
+            'pretrained_speaker_model': 'titanet_large'
+        },
+        'nemo_ecapa': {
+            'pretrained_speaker_model': 'ecapa_tdnn'
+        },
+        'sb_default': {}
+    }
+)
+```
+
+### Configuration Example (main_v6.py)
+
+```python
+diarization_model = RealtimeSpeakerDiarization(
+    models=['speechbrain', 'nemo'],    # Models to use
+    fusion_method="score_level",       # Fusion strategy
+    fusion_weights=[0.4, 0.6],         # Weights (40% SB, 60% NeMo)
     dimension_alignment="max",         # Dimension handling
     similarity_threshold=0.6,          # Matching threshold
     embedding_update_weight=0.3,       # EMA update weight
     min_similarity_gap=0.25,           # Minimum gap for matching
-    use_pyannote=True,                 # Enable Pyannote
-    use_speechbrain=True,              # Enable SpeechBrain
-    pyannote_config={
-        "model_name": "pyannote/speaker-diarization-community-1",
-        "token": os.getenv("HF_TOKEN"),
+    model_configs={
+        'nemo': {
+            'pretrained_speaker_model': 'titanet_large'
+        }
+    }
+)
+```
+
+## 🎯 Multiple Model Instances (Advanced)
+
+Fusion diarization hỗ trợ sử dụng nhiều instances của cùng model type với configs khác nhau:
+
+### Example: Multiple NeMo Models
+
+```python
+from fusion_diarization import RealtimeSpeakerDiarization
+
+pipeline = RealtimeSpeakerDiarization(
+    models=[
+        ('nemo', 'nemo_titanet'),      # NeMo TitaNet Large
+        ('nemo', 'nemo_ecapa'),        # NeMo ECAPA-TDNN
+        ('speechbrain', 'sb')          # SpeechBrain
+    ],
+    fusion_method="score_level",
+    fusion_weights=[0.4, 0.3, 0.3],
+    model_configs={
+        'nemo_titanet': {
+            'pretrained_speaker_model': 'titanet_large'
+        },
+        'nemo_ecapa': {
+            'pretrained_speaker_model': 'ecapa_tdnn'
+        },
+        'sb': {}
+    }
+)
+```
+
+### Lợi ích:
+- **So sánh variants**: Đánh giá hiệu suất các pretrained models khác nhau
+- **Ensemble learning**: Kết hợp nhiều variants để tăng độ chính xác
+- **Robust predictions**: Giảm lỗi từ individual models
+- **Flexible weighting**: Tùy chỉnh trọng số cho từng instance
+
+### Xem thêm:
+- `backend/FUSION_MULTIPLE_MODELS.md`: Hướng dẫn chi tiết
+- `backend/FUSION_DIARIZATION_README.md`: Tài liệu Fusion system
+- `backend/eval/eval_docs.md`: Evaluation với multiple instances
+
+## 📖 Fusion Diarization Details
+
+### Supported Models
+
+Fusion system hỗ trợ 3 loại models chính:
+
+1. **SpeechBrain** (`speechbrain/spkrec-ecapa-voxceleb`)
+   - Embedding dimension: 192
+   - Fast và ổn định
+   - Không yêu cầu API token
+
+2. **Pyannote** (`pyannote/speaker-diarization-community-1`)
+   - Embedding dimension: 256
+   - Chất lượng cao
+   - Yêu cầu HuggingFace token
+
+3. **NeMo** (NVIDIA NeMo Toolkit)
+   - TitaNet Large: 192-dim, chất lượng rất cao
+   - ECAPA-TDNN: 192-dim, nhanh
+   - SpeakerNet: 256-dim
+   - Không yêu cầu API token
+
+### Fusion Strategies Comparison
+
+| Method | Computation | Weights Sum | Best For |
+|--------|------------|-------------|----------|
+| `score_level` | Compute scores then fuse | Must = 1.0 | **Khuyến nghị ⭐** |
+| `weighted_average` | Weighted avg of embeddings | Must = 1.0 | Fast, effective |
+| `normalized_average` | Equal avg of embeddings | N/A | Simple, balanced |
+| `concatenate` | Concat all embeddings | N/A | Preserve all info |
+| `product` | Element-wise product | N/A | Filter noise |
+| `max_pool` | Element-wise max | N/A | Robust to outliers |
+| `learned_concat` | Weighted concat | Any positive | After optimization |
+
+### Real-world Examples
+
+**Example 1: Production - SpeechBrain + NeMo (main_v6.py)**
+```python
+diarization_model = RealtimeSpeakerDiarization(
+    models=['speechbrain', 'nemo'],
+    fusion_method="score_level",
+    fusion_weights=[0.4, 0.6],  # 40% SB, 60% NeMo
+    model_configs={
+        'nemo': {'pretrained_speaker_model': 'titanet_large'}
     },
-    speechbrain_config={
-        "model_name": "speechbrain/spkrec-ecapa-tdnn-voxceleb",
+    similarity_threshold=0.6,
+    embedding_update_weight=0.3,
+    min_similarity_gap=0.25
+)
+```
+
+**Example 2: Research - Multiple NeMo Variants**
+```python
+pipeline = RealtimeSpeakerDiarization(
+    models=[
+        ('nemo', 'nemo_titanet'),
+        ('nemo', 'nemo_ecapa'),
+        ('speechbrain', 'sb')
+    ],
+    fusion_method="score_level",
+    fusion_weights=[0.4, 0.3, 0.3],
+    model_configs={
+        'nemo_titanet': {'pretrained_speaker_model': 'titanet_large'},
+        'nemo_ecapa': {'pretrained_speaker_model': 'ecapa_tdnn'},
+        'sb': {}
+    }
+)
+```
+
+**Example 3: All Three Models**
+```python
+pipeline = RealtimeSpeakerDiarization(
+    models=['speechbrain', 'pyannote', 'nemo'],
+    fusion_method="score_level",
+    fusion_weights=[0.3, 0.4, 0.3],
+    model_configs={
+        'pyannote': {
+            'model_name': 'pyannote/speaker-diarization-community-1',
+            'token': os.getenv('HF_TOKEN')
+        },
+        'nemo': {'pretrained_speaker_model': 'titanet_large'}
     }
 )
 ```
@@ -868,7 +1051,10 @@ Trong `transcribe_file()`:
 - Dùng script (trong thư mục `backend/scripts/`):
   - `run_main_with_cuda.sh` - main.py
   - `run_main_v2_with_cuda.sh` - main_v2.py
-  - `run_main_v3_with_cuda.sh` - main_v3.py (khuyến nghị)
+  - `run_main_v3_with_cuda.sh` - main_v3.py
+  - `run_main_v4_with_cuda.sh` - main_v4.py
+  - `run_main_v5_with_cuda.sh` - main_v5.py
+  - `run_main_v6_with_cuda.sh` - main_v6.py (khuyến nghị ⭐)
   - `run_main_sensevoice_with_cuda.sh` - SenseVoice
 - Hoặc tự set:
   ```bash
@@ -879,19 +1065,22 @@ Trong `transcribe_file()`:
 - **main_v2.py**: Cần đợi bootstrap phase (~1 phút) để thu thập đủ dữ liệu
 - **main_v3.py**: SpeechBrain - Hoạt động ngay từ đầu, không cần bootstrap
 - **main_v4.py**: Pyannote - Yêu cầu HF_TOKEN, chất lượng cao
-- **main_v5.py** (khuyến nghị ⭐): Fusion - Tốt nhất, kết hợp cả hai hệ thống
+- **main_v5.py**: NeMo - Hoạt động ngay từ đầu, chất lượng cao
+- **main_v6.py** (khuyến nghị ⭐): Fusion - Tốt nhất, kết hợp SpeechBrain + NeMo
 - Kiểm tra:
   - `max_speakers` có được set đúng không
   - Audio có đủ rõ để trích xuất embedding không
   - Log có hiển thị similarity scores không
-  - HF_TOKEN có được set đúng cho main_v4/v5 không
+  - HF_TOKEN có được set đúng cho main_v4 không (nếu dùng Pyannote)
   - Embeddings có bị zero vectors không (check warnings)
+  - Model configs có đúng cho fusion instances không
 
 ### Chọn version nào?
 - **Mới bắt đầu hoặc testing**: `main.py` - Đơn giản nhất
-- **Cần speaker detection tốt nhất (miễn phí)**: `main_v5.py` ⭐ - Fusion diarization, chính xác cao nhất
-- **Cần speaker detection nhanh**: `main_v3.py` - SpeechBrain, nhanh và ổn định
+- **Cần speaker detection tốt nhất (miễn phí)**: `main_v6.py` ⭐ - Fusion (SB+NeMo), chính xác cao nhất
+- **Cần speaker detection nhanh**: `main_v3.py` hoặc `main_v5.py` - SpeechBrain/NeMo, nhanh và ổn định
 - **Cần speaker detection chất lượng cao**: `main_v4.py` - Pyannote embeddings
+- **Cần NeMo only**: `main_v5.py` - NeMo TitaNet, hiệu suất tốt
 - **Cần tự động phân cụm speakers**: `main_v2.py` - Bootstrap clustering
 - **Cần chính xác cao nhất (API)**: `main_gemini.py` ⭐ - Google Gemini API
 - **Cần self-hosted API**: `main_qwenaudio.py` - Deploy trên Modal
@@ -945,9 +1134,10 @@ modal app list
 - Speaker diarization models được preload một lần để tối ưu hiệu suất:
   - `main_v3.py`: SpeechBrain ECAPA-TDNN
   - `main_v4.py`: Pyannote.audio embeddings
-  - `main_v5.py`: Cả Pyannote và SpeechBrain (fusion)
+  - `main_v5.py`: NeMo TitaNet Large
+  - `main_v6.py`: SpeechBrain + NeMo (fusion) ⭐
 - File tạm sẽ tự động xóa sau khi xử lý xong
-- **Khuyến nghị sử dụng `main_v5.py`** - Version tối ưu nhất với Fusion diarization (Pyannote + SpeechBrain)
+- **Khuyến nghị sử dụng `main_v6.py`** - Version tối ưu nhất với Fusion diarization (SpeechBrain + NeMo)
 
 ### Realtime Transcription
 - **Dual-buffer strategy**:
@@ -977,18 +1167,24 @@ modal app list
   - 2-tier matching: EMA embedding + cluster centroid
   - Session management và persistent tracking
   - Chất lượng embeddings cao, độ chính xác rất tốt
-- **main_v5.py**: Fusion diarization (KHUYẾN NGHỊ ⭐)
-  - **Kết hợp cả Pyannote và SpeechBrain**
+- **main_v5.py**: NeMo diarization
+  - NeMo TitaNet Large embeddings (high-quality)
+  - 2-tier matching: EMA embedding + cluster centroid
+  - Session management và persistent tracking
+  - Nhanh, chất lượng embeddings cao
+- **main_v6.py**: Fusion diarization (KHUYẾN NGHỊ ⭐)
+  - **Kết hợp SpeechBrain + NeMo** (có thể thêm Pyannote nếu cần)
   - **Fusion methods**: score_level (khuyến nghị), concatenate, weighted_average, product, max_pool, learned_concat
   - **2-tier matching** với fused embeddings
   - **Persistent speaker memory**: Lưu trữ cả fused embeddings và individual embeddings
-  - **Dimension alignment**: Tự động xử lý dimension mismatch (Pyannote 256-dim vs SpeechBrain 192-dim)
+  - **Dimension alignment**: Tự động xử lý dimension mismatch giữa các models
+  - **Multiple model instances**: Hỗ trợ nhiều instances của cùng model type với configs khác nhau
   - **Max speakers constraint**: Force-assign vào speaker có similarity cao nhất khi đạt limit
   - **Session management**: Multiple conversations độc lập
   - **NaN handling**: Xử lý zero vectors và NaN similarities
-  - **Preloaded models**: Load cả hai models một lần, tái sử dụng cho tất cả sessions
+  - **Preloaded models**: Load tất cả models một lần, tái sử dụng cho tất cả sessions
   - Speaker ID được gán dạng `SPEAKER_00`, `SPEAKER_01`, ...
-  - **Chính xác cao nhất**, tận dụng ưu điểm của cả hai hệ thống
+  - **Chính xác cao nhất**, tận dụng ưu điểm của tất cả models
 - Với video files, audio sẽ được extract tự động nếu có ffmpeg
 
 ### Performance Metrics
@@ -1010,6 +1206,73 @@ modal app list
 - **VAD (Voice Activity Detection)**: Sử dụng Silero VAD để lọc silence
 - **Audio format**: PCM16 mono 16kHz cho WebSocket, tự động convert cho file upload
 
+## 📊 Evaluation System
+
+Hệ thống evaluation đánh giá chất lượng của ASR và Speaker Diarization.
+
+### ASR Evaluation (`eval/eval_asr.py`)
+
+Đánh giá các ASR models với các metrics:
+- **WER (Word Error Rate)**: Tỷ lệ lỗi từ
+- **CER (Character Error Rate)**: Tỷ lệ lỗi ký tự
+- **RTF (Real-Time Factor)**: Tỷ lệ processing_time/audio_duration
+
+```bash
+cd backend/eval
+python eval_asr.py
+```
+
+**Supported Models:**
+- Whisper (faster-whisper)
+- SenseVoice (FunASR)
+- Gemini (Google API)
+- VLLM (OpenAI-compatible)
+
+### Diarization Evaluation (`eval/eval_diarization.py`)
+
+Đánh giá speaker verification với multiple metrics:
+- **EER (Equal Error Rate)**: Điểm FAR = FRR
+- **FAR/FRR**: False Accept/Reject Rates
+- **Precision/Recall/F1**: Classification metrics
+- **AUC**: Area Under ROC Curve
+
+```bash
+cd backend/eval
+python eval_diarization.py
+```
+
+**Features:**
+- Đánh giá multiple model instances cùng lúc
+- Automatic caching để tái sử dụng embeddings
+- Visualization: ROC curves, DET curves, Precision-Recall curves
+- Support for multiple model instances
+
+**Example Output:**
+```
+=== Evaluating pyannote embeddings ===
+EER: 5.23% | AUC: 0.9876
+
+=== Evaluating speechbrain embeddings ===
+EER: 4.87% | AUC: 0.9912
+
+=== Evaluating nemo_titanet embeddings ===
+EER: 3.45% | AUC: 0.9945
+
+=== Evaluating nemo_ecapa_tdnn embeddings ===
+EER: 4.12% | AUC: 0.9928
+```
+
+**Generated Files:**
+- `eval_results/roc_curves.png`: ROC curves comparison
+- `eval_results/det_curves.png`: DET curves comparison
+- `eval_results/precision_recall_curves.png`: PR curves comparison
+- `eval_cache/`: Cached embeddings for fast re-evaluation
+
+### Documentation
+- `backend/eval/eval_docs.md`: Chi tiết về evaluation system
+- Hướng dẫn dataset structure, metrics, visualization
+- Examples và best practices
+
 ## 🔧 Dependencies
 
 Xem `backend/requirements.txt` để biết danh sách đầy đủ.
@@ -1021,8 +1284,9 @@ Xem `backend/requirements.txt` để biết danh sách đầy đủ.
 - `soundfile`: Audio I/O
 - `av` (PyAV): Decode audio/video files
 - `torch`: Deep learning framework
-- `speechbrain`: Speaker diarization (ECAPA-TDNN) - main_v3.py, main_v5.py
-- `pyannote.audio`: Speaker diarization (embeddings) - main_v4.py, main_v5.py
+- `speechbrain`: Speaker diarization (ECAPA-TDNN) - main_v3.py, main_v6.py
+- `pyannote.audio`: Speaker diarization (embeddings) - main_v4.py
+- `nemo_toolkit[asr]`: Speaker diarization (TitaNet, ECAPA-TDNN) - main_v5.py, main_v6.py
 - `scipy`: Scientific computing (cdist for similarity)
 
 **Whisper-based Versions:**
